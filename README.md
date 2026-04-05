@@ -1,4 +1,4 @@
-# pi-lens
+# pi-local-rag
 
 Local BM25 RAG pipeline for the [Pi coding agent](https://github.com/badlogic/pi-mono). Index your local files and search them with keyword matching — **zero cloud dependency, works fully offline**.
 
@@ -19,7 +19,7 @@ pi install npm:pi-local-rag
 Or via git:
 
 ```bash
-pi install git:github.com/vahidkowsari/pi-lens
+pi install git:github.com/vahidkowsari/pi-local-rag
 ```
 
 ## Commands

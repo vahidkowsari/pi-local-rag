@@ -32,11 +32,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vahidkowsari/pi-lens.git"
+    "url": "git+https://github.com/vahidkowsari/pi-local-rag.git"
   },
-  "homepage": "https://github.com/vahidkowsari/pi-lens#readme",
+  "homepage": "https://github.com/vahidkowsari/pi-local-rag#readme",
   "bugs": {
-    "url": "https://github.com/vahidkowsari/pi-lens/issues"
+    "url": "https://github.com/vahidkowsari/pi-local-rag/issues"
   },
   "engines": {
     "node": ">=20"

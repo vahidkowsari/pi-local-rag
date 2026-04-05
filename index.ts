@@ -1,5 +1,5 @@
 /**
- * pi-lens — Local RAG Pipeline
+ * pi-local-rag — Local RAG Pipeline
  * 
  * Index local files → chunk → store → retrieve. AI consults YOUR knowledge before hallucinating.
  * Zero cloud dependency. Embeddings via Ollama (local) or keyword fallback.
@@ -214,7 +214,7 @@ export default function (pi: ExtensionAPI) {
   ensureDir();
 
   pi.registerCommand("lens", {
-    description: "pi-lens pipeline: /lens index|search|status|rebuild|clear|context",
+    description: "pi-local-rag pipeline: /lens index|search|status|rebuild|clear|context",
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/);
       const cmd = parts[0] || "status";
@@ -281,7 +281,7 @@ export default function (pi: ExtensionAPI) {
       const index = loadIndex();
       const fileCount = Object.keys(index.files).length;
       const totalTokens = index.chunks.reduce((sum, c) => sum + c.tokens, 0);
-      let out = `${B}${CYAN}🔍 pi-lens Index Status${RST}\n\n`;
+      let out = `${B}${CYAN}🔍 pi-local-rag Index Status${RST}\n\n`;
       out += `  Files indexed: ${GREEN}${fileCount}${RST}\n`;
       out += `  Chunks: ${GREEN}${index.chunks.length}${RST}\n`;
       out += `  Total tokens: ${GREEN}${totalTokens.toLocaleString()}${RST}\n`;
@@ -301,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "lens_index",
-    description: "Index a file or directory into the local pi-lens pipeline. Chunks text files, stores for BM25 keyword search.",
+    description: "Index a file or directory into the local pi-local-rag pipeline. Chunks text files, stores for BM25 keyword search.",
     parameters: Type.Object({
       path: Type.String({ description: "File or directory path to index" }),
     }),
@@ -322,7 +322,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "lens_query",
-    description: "Search the local pi-lens index using BM25 keyword matching. Returns relevant chunks from indexed files with file paths and line numbers.",
+    description: "Search the local pi-local-rag index using BM25 keyword matching. Returns relevant chunks from indexed files with file paths and line numbers.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
@@ -330,7 +330,7 @@ export default function (pi: ExtensionAPI) {
     execute: async (_toolCallId, params) => {
       const index = loadIndex();
       let text: string;
-      if (!index.chunks.length) text = "pi-lens index is empty. Run lens_index first.";
+      if (!index.chunks.length) text = "pi-local-rag index is empty. Run lens_index first."
       else {
         const results = searchChunks(params.query, index, params.limit || 10);
         if (!results.length) text = `No results for: ${params.query}`;
@@ -345,7 +345,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "lens_status",
-    description: "Show pi-lens index statistics: file count, chunk count, total tokens, last build time.",
+    description: "Show pi-local-rag index statistics: file count, chunk count, total tokens, last build time.",
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {
       const index = loadIndex();
