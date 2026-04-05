@@ -1,0 +1,55 @@
+{
+  "name": "pi-lens",
+  "version": "0.1.0",
+  "description": "Local BM25 RAG pipeline for the Pi coding agent. Index local files and search them with keyword matching — zero cloud dependency.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npx --yes -p typescript@5.7.3 tsc -p tsconfig.json --noCheck"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "rag",
+    "search",
+    "bm25",
+    "index",
+    "local",
+    "offline"
+  ],
+  "author": "kowsari",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kowsari/pi-lens.git"
+  },
+  "homepage": "https://github.com/kowsari/pi-lens#readme",
+  "bugs": {
+    "url": "https://github.com/kowsari/pi-lens/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.60.0"
+  }
+}
