@@ -4,25 +4,26 @@
  * Index local files → chunk → embed → store → retrieve → inject into LLM context.
  * Uses Transformers.js (ONNX) for local embeddings — zero cloud dependency.
  *
- * /lens index <path>     → index + embed a file or directory
- * /lens search <query>   → hybrid search (BM25 + vector)
- * /lens status           → show index stats
- * /lens rebuild          → rebuild entire index
- * /lens clear            → clear index
- * /lens rag on|off       → toggle auto-injection
+ * /rag index <path>     → index + embed a file or directory
+ * /rag search <query>   → hybrid search (BM25 + vector)
+ * /rag status           → show index stats
+ * /rag rebuild          → rebuild entire index
+ * /rag clear            → clear index
+ * /rag on|off           → toggle auto-injection
  *
- * Tools: lens_index, lens_query, lens_status
+ * Tools: rag_index, rag_query, rag_status
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync } from "node:fs";
 import { join, extname, basename } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const RAG_DIR = join(homedir(), ".pi", "lens");
+const RAG_DIR = join(homedir(), ".pi", "rag");
+const LEGACY_DIR = join(homedir(), ".pi", "lens"); // renamed from lens → rag
 const INDEX_FILE = join(RAG_DIR, "index.json");
 const CONFIG_FILE = join(RAG_DIR, "config.json");
 
@@ -92,7 +93,18 @@ function saveConfig(config: RagConfig) {
 // ─── Index I/O ───────────────────────────────────────────────────────────────
 
 function ensureDir() {
-  if (!existsSync(RAG_DIR)) mkdirSync(RAG_DIR, { recursive: true });
+  if (!existsSync(RAG_DIR)) {
+    // Migrate legacy .pi/lens directory to .pi/rag on first run
+    if (existsSync(LEGACY_DIR)) {
+      try {
+        renameSync(LEGACY_DIR, RAG_DIR);
+      } catch {
+        mkdirSync(RAG_DIR, { recursive: true });
+      }
+    } else {
+      mkdirSync(RAG_DIR, { recursive: true });
+    }
+  }
 }
 
 function loadIndex(): IndexMeta {
@@ -186,13 +198,11 @@ function chunkText(text: string, maxLines = 50): { content: string; lineStart: n
   return chunks;
 }
 
-function collectFiles(dirPath: string, maxFiles = 500): string[] {
+function collectFiles(dirPath: string): string[] {
   const files: string[] = [];
   function walk(dir: string) {
-    if (files.length >= maxFiles) return;
     try {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (files.length >= maxFiles) return;
         if (entry.isDirectory()) {
           if (!SKIP_DIRS.has(entry.name) && !entry.name.startsWith(".")) walk(join(dir, entry.name));
         } else if (TEXT_EXTS.has(extname(entry.name).toLowerCase())) {
@@ -217,29 +227,63 @@ function collectFiles(dirPath: string, maxFiles = 500): string[] {
 
 // ─── Indexing ─────────────────────────────────────────────────────────────────
 
+interface ProgressCallbacks {
+  onFile?: (current: number, total: number, filename: string, skipped: number) => void;
+  onChunk?: (fileChunk: number, totalChunks: number, filename: string) => void;
+  onSave?: () => void;
+}
+
+/** Yield to the event loop so the TUI can re-render between heavy operations */
+const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
+
+/** Write overwriting progress line to stderr (visible in terminal even during tool calls) */
+function stderrProgress(msg: string) {
+  process.stderr.write(`\r\x1b[2K${msg}`);
+}
+
 async function indexFiles(
   paths: string[],
-  onProgress?: (msg: string) => void
-): Promise<{ indexed: number; chunks: number; skipped: number }> {
+  progress?: ProgressCallbacks
+): Promise<{ indexed: number; chunks: number; skipped: number; durationMs: number }> {
   const index = loadIndex();
   let indexed = 0, chunked = 0, skipped = 0;
+  const startMs = Date.now();
+  const total = paths.length;
 
-  for (const fp of paths) {
+  for (let i = 0; i < paths.length; i++) {
+    const fp = paths[i];
+    const pct = Math.round(((i + 1) / total) * 100);
+    const name = basename(fp);
+
     try {
       const content = readFileSync(fp, "utf-8");
       const hash = sha256(content);
 
-      if (index.files[fp]?.hash === hash && index.files[fp]?.embedded) { skipped++; continue; }
+      if (index.files[fp]?.hash === hash && index.files[fp]?.embedded) {
+        skipped++;
+        stderrProgress(`[${i + 1}/${total}] ${pct}% skipped ${name}`);
+        progress?.onFile?.(i + 1, total, name, skipped);
+        await yield_(); // let TUI paint
+        continue;
+      }
 
       index.chunks = index.chunks.filter(c => c.file !== fp);
-
       const rawChunks = chunkText(content);
-      onProgress?.(`Embedding ${basename(fp)} (${rawChunks.length} chunks)...`);
 
-      const vectors = await embedBatch(rawChunks.map(c => c.content));
+      stderrProgress(`[${i + 1}/${total}] ${pct}% embedding ${name} (${rawChunks.length} chunks)`);
+      progress?.onFile?.(i + 1, total, name, skipped);
+      await yield_();
 
-      for (let i = 0; i < rawChunks.length; i++) {
-        const chunk = rawChunks[i];
+      const vectors = await embedBatch(
+        rawChunks.map(c => c.content),
+        (ci) => {
+          stderrProgress(`[${i + 1}/${total}] ${pct}% ${name} — chunk ${ci}/${rawChunks.length}`);
+          progress?.onChunk?.(ci, rawChunks.length, name);
+        }
+      );
+
+      for (let j = 0; j < rawChunks.length; j++) {
+        const chunk = rawChunks[j];
         index.chunks.push({
           id: `${sha256(fp)}-${chunk.lineStart}`,
           file: fp,
@@ -249,20 +293,24 @@ async function indexFiles(
           hash: sha256(chunk.content),
           indexed: new Date().toISOString(),
           tokens: Math.ceil(chunk.content.length / 4),
-          vector: vectors[i],
+          vector: vectors[j],
         });
         chunked++;
       }
 
       index.files[fp] = { hash, chunks: rawChunks.length, indexed: new Date().toISOString(), size: content.length, embedded: true };
       indexed++;
-    } catch (e) { skipped++; }
+    } catch { skipped++; }
   }
 
+  // Clear stderr progress line
+  process.stderr.write(`\r\x1b[2K`);
+
+  progress?.onSave?.();
   index.lastBuild = new Date().toISOString();
   index.embeddingModel = EMBEDDING_MODEL;
   saveIndex(index);
-  return { indexed, chunks: chunked, skipped };
+  return { indexed, chunks: chunked, skipped, durationMs: Date.now() - startMs };
 }
 
 // ─── Search ───────────────────────────────────────────────────────────────────
@@ -367,9 +415,9 @@ export default function (pi: ExtensionAPI) {
     };
   });
 
-  // ── /lens command ──
-  pi.registerCommand("lens", {
-    description: "pi-local-rag: /lens index|search|status|rebuild|clear|rag",
+  // ── /rag command ──
+  pi.registerCommand("rag", {
+    description: "pi-local-rag: /rag index|search|status|rebuild|clear|on|off",
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/);
       const cmd = parts[0] || "status";
@@ -380,16 +428,46 @@ export default function (pi: ExtensionAPI) {
         if (!existsSync(path)) return `${RED}Path not found:${RST} ${path}`;
         const files = collectFiles(path);
         if (!files.length) return `${YELLOW}No indexable files found in:${RST} ${path}`;
-        ctx.ui.notify(`Indexing ${files.length} files...`, "info");
-        const result = await indexFiles(files, msg => ctx.ui.notify(msg, "info"));
-        return `${GREEN}✅ Indexed:${RST} ${result.indexed} files, ${result.chunks} chunks, ${result.skipped} unchanged\n` +
-          `${D}Embeddings: ${EMBEDDING_MODEL}${RST}`;
+
+        const total = files.length;
+        ctx.ui.notify(`Found ${total} files to index`, "info");
+
+        function progressBar(n: number, total: number, width = 24): string {
+          const filled = Math.round((n / total) * width);
+          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
+        }
+
+        const result = await indexFiles(files, {
+          onFile(current, total, filename, skipped) {
+            const pct = Math.round((current / total) * 100);
+            const bar = progressBar(current, total);
+            ctx.ui.setStatus("rag", `■ Indexing ${pct}% │ ${current}/${total} files │ ${skipped} unchanged`);
+            ctx.ui.setWidget("rag", [
+              `${B}${CYAN}Indexing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+              `${D}file:    ${RST}${filename}`,
+              `${D}done:    ${RST}${GREEN}${current - skipped} embedded${RST}  ${D}${skipped} unchanged${RST}`,
+            ]);
+          },
+          onChunk(ci, total, filename) {
+            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
+          },
+          onSave() {
+            ctx.ui.setStatus("rag", `■ Saving index...`);
+          },
+        });
+
+        ctx.ui.setStatus("rag", undefined);
+        ctx.ui.setWidget("rag", undefined);
+
+        const secs = (result.durationMs / 1000).toFixed(1);
+        return `${GREEN}✅ Indexed:${RST} ${result.indexed} files (${result.chunks} chunks) │ ${result.skipped} unchanged │ ${secs}s\n` +
+          `${D}Model: ${EMBEDDING_MODEL} │ Storage: ${RAG_DIR}${RST}`;
       }
 
       // ── search ──
       if (cmd === "search") {
         const query = parts.slice(1).join(" ");
-        if (!query) return `${YELLOW}Usage:${RST} /lens search <query>`;
+        if (!query) return `${YELLOW}Usage:${RST} /rag search <query>`;
         const index = loadIndex();
         const config = loadConfig();
         const results = await hybridSearch(query, index, 10, config.ragAlpha);
@@ -397,7 +475,7 @@ export default function (pi: ExtensionAPI) {
 
         const hasVectors = index.chunks.some(c => c.vector);
         let out = `${B}${CYAN}🔍 ${results.length} results for "${query}"${RST}`;
-        out += ` ${D}(${hasVectors ? "hybrid BM25+vector" : "BM25 only — run /lens index to add vectors"})${RST}\n\n`;
+        out += ` ${D}(${hasVectors ? "hybrid BM25+vector" : "BM25 only — run /rag index to add vectors"})${RST}\n\n`;
 
         for (const r of results) {
           const bar = "█".repeat(Math.round(r.hybrid * 10)) + "░".repeat(10 - Math.round(r.hybrid * 10));
@@ -409,33 +487,66 @@ export default function (pi: ExtensionAPI) {
         return out;
       }
 
-      // ── rag toggle ──
-      if (cmd === "rag") {
+      // ── on/off toggle ──
+      if (cmd === "on" || cmd === "off") {
         const config = loadConfig();
-        const sub = parts[1];
-        if (sub === "on") { config.ragEnabled = true; saveConfig(config); return `${GREEN}✅ RAG auto-injection enabled${RST}`; }
-        if (sub === "off") { config.ragEnabled = false; saveConfig(config); return `${YELLOW}RAG auto-injection disabled${RST}`; }
-        return `${B}RAG:${RST} ${config.ragEnabled ? `${GREEN}enabled${RST}` : `${YELLOW}disabled${RST}`}\n` +
-          `  topK: ${config.ragTopK}  threshold: ${config.ragScoreThreshold}  alpha: ${config.ragAlpha} ${D}(0=pure vector, 1=pure BM25)${RST}`;
+        config.ragEnabled = cmd === "on";
+        saveConfig(config);
+        return cmd === "on"
+          ? `${GREEN}✅ RAG auto-injection enabled${RST}`
+          : `${YELLOW}RAG auto-injection disabled${RST}`;
       }
 
       // ── rebuild ──
       if (cmd === "rebuild") {
         const index = loadIndex();
         const allFiles = Object.keys(index.files);
-        if (!allFiles.length) return `${YELLOW}No files in index. Run /lens index <path> first.${RST}`;
+        if (!allFiles.length) return `${YELLOW}No files in index. Run /rag index <path> first.${RST}`;
+
         const existingFiles = allFiles.filter(f => existsSync(f));
         const deletedFiles = allFiles.filter(f => !existsSync(f));
+
+        // Prune deleted files
         for (const f of deletedFiles) {
           index.chunks = index.chunks.filter(c => c.file !== f);
           delete index.files[f];
         }
-        // Force re-embed by clearing embedded flag
+        // Force re-embed all existing files
         for (const f of existingFiles) { if (index.files[f]) index.files[f].embedded = false; }
         saveIndex(index);
+
+        if (deletedFiles.length) ctx.ui.notify(`Pruned ${deletedFiles.length} deleted files`, "info");
         ctx.ui.notify(`Rebuilding ${existingFiles.length} files...`, "info");
-        const result = await indexFiles(existingFiles, msg => ctx.ui.notify(msg, "info"));
-        return `${GREEN}✅ Rebuilt:${RST} pruned ${deletedFiles.length} deleted, re-indexed ${result.indexed} changed, ${result.skipped} unchanged (${result.chunks} new chunks)`;
+
+        function progressBar(n: number, total: number, width = 24): string {
+          const filled = Math.round((n / total) * width);
+          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
+        }
+
+        const result = await indexFiles(existingFiles, {
+          onFile(current, total, filename, skipped) {
+            const pct = Math.round((current / total) * 100);
+            const bar = progressBar(current, total);
+            ctx.ui.setStatus("rag", `■ Rebuilding ${pct}% │ ${current}/${total} │ ${skipped} unchanged`);
+            ctx.ui.setWidget("rag", [
+              `${B}${CYAN}Rebuilding${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+              `${D}file:    ${RST}${filename}`,
+              `${D}done:    ${RST}${GREEN}${current - skipped} re-embedded${RST}  ${D}${skipped} unchanged${RST}`,
+            ]);
+          },
+          onChunk(ci, total, filename) {
+            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
+          },
+          onSave() {
+            ctx.ui.setStatus("rag", `■ Saving index...`);
+          },
+        });
+
+        ctx.ui.setStatus("rag", undefined);
+        ctx.ui.setWidget("rag", undefined);
+
+        const secs = (result.durationMs / 1000).toFixed(1);
+        return `${GREEN}✅ Rebuilt:${RST} ${result.indexed} re-indexed │ ${result.skipped} unchanged │ ${deletedFiles.length} deleted │ ${result.chunks} chunks │ ${secs}s`;
       }
 
       // ── clear ──
@@ -444,7 +555,7 @@ export default function (pi: ExtensionAPI) {
         return `${GREEN}✅ Index cleared.${RST}`;
       }
 
-      // ── status ──
+      // ── status (default) ──
       const index = loadIndex();
       const config = loadConfig();
       const fileCount = Object.keys(index.files).length;
@@ -453,14 +564,14 @@ export default function (pi: ExtensionAPI) {
       const vectorCoverage = index.chunks.length ? Math.round(embeddedCount / index.chunks.length * 100) : 0;
 
       let out = `${B}${CYAN}🔍 pi-local-rag Status${RST}\n\n`;
-      out += `  Files indexed:  ${GREEN}${fileCount}${RST}\n`;
-      out += `  Chunks:         ${GREEN}${index.chunks.length}${RST}\n`;
-      out += `  Vectors:        ${GREEN}${embeddedCount}${RST} ${D}(${vectorCoverage}% coverage)${RST}\n`;
-      out += `  Total tokens:   ${GREEN}${totalTokens.toLocaleString()}${RST}\n`;
+      out += `  Files indexed:   ${GREEN}${fileCount}${RST}\n`;
+      out += `  Chunks:          ${GREEN}${index.chunks.length}${RST}\n`;
+      out += `  Vectors:         ${GREEN}${embeddedCount}${RST} ${D}(${vectorCoverage}% coverage)${RST}\n`;
+      out += `  Total tokens:    ${GREEN}${totalTokens.toLocaleString()}${RST}\n`;
       out += `  Embedding model: ${D}${index.embeddingModel || "none"}${RST}\n`;
-      out += `  Last build:     ${index.lastBuild || "never"}\n`;
-      out += `  Storage:        ${D}${RAG_DIR}${RST}\n\n`;
-      out += `  RAG injection:  ${config.ragEnabled ? `${GREEN}enabled${RST}` : `${YELLOW}disabled${RST}`}`;
+      out += `  Last build:      ${index.lastBuild || "never"}\n`;
+      out += `  Storage:         ${D}${RAG_DIR}${RST}\n\n`;
+      out += `  RAG injection:   ${config.ragEnabled ? `${GREEN}enabled${RST}` : `${YELLOW}disabled${RST}`}`;
       out += `  topK=${config.ragTopK}  threshold=${config.ragScoreThreshold}  alpha=${config.ragAlpha}\n`;
 
       if (fileCount) {
@@ -478,7 +589,7 @@ export default function (pi: ExtensionAPI) {
   // ── Tools ──
 
   pi.registerTool({
-    name: "lens_index",
+    name: "rag_index",
     description: "Index a file or directory into the local pi-local-rag pipeline. Chunks text files, generates embeddings, stores for hybrid BM25+vector search.",
     parameters: Type.Object({
       path: Type.String({ description: "File or directory path to index" }),
@@ -487,13 +598,14 @@ export default function (pi: ExtensionAPI) {
       if (!existsSync(params.path)) return { content: [{ type: "text" as const, text: `Path not found: ${params.path}` }] };
       const files = collectFiles(params.path);
       if (!files.length) return { content: [{ type: "text" as const, text: `No indexable text files found in: ${params.path}` }] };
-      const result = await indexFiles(files);
-      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged.` }] };
+      const result = await indexFiles(files, {});
+      process.stderr.write(`\n`);
+      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s` }] };
     },
   });
 
   pi.registerTool({
-    name: "lens_query",
+    name: "rag_query",
     description: "Search the local pi-local-rag index using hybrid BM25+vector search. Returns relevant chunks with file paths, line numbers, and relevance scores.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
@@ -501,7 +613,7 @@ export default function (pi: ExtensionAPI) {
     }),
     execute: async (_toolCallId, params) => {
       const index = loadIndex();
-      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run lens_index first." }] };
+      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }] };
       const config = loadConfig();
       const results = await hybridSearch(params.query, index, params.limit ?? 10, config.ragAlpha);
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }] };
@@ -517,7 +629,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "lens_status",
+    name: "rag_status",
     description: "Show pi-local-rag index statistics: file count, chunk count, vector coverage, embedding model, RAG config.",
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {

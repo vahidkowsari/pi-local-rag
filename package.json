@@ -1,6 +1,6 @@
 {
   "name": "pi-local-rag",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Hybrid RAG pipeline for the Pi coding agent. BM25 + local vector embeddings (Transformers.js) + auto-injection into LLM context. Zero cloud dependency.",
   "type": "module",
   "main": "./index.ts",
