@@ -725,22 +725,24 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "rag_index",
+    label: "RAG index",
     description: "Index a file or directory into the local pi-local-rag pipeline. Chunks text files, generates embeddings, stores for hybrid BM25+vector search.",
     parameters: Type.Object({
       path: Type.String({ description: "File or directory path to index" }),
     }),
     execute: async (_toolCallId, params) => {
-      if (!existsSync(params.path)) return { content: [{ type: "text" as const, text: `Path not found: ${params.path}` }] };
+      if (!existsSync(params.path)) return { content: [{ type: "text" as const, text: `Path not found: ${params.path}` }], details: undefined };
       const files = collectFiles(params.path);
-      if (!files.length) return { content: [{ type: "text" as const, text: `No indexable text files found in: ${params.path}` }] };
+      if (!files.length) return { content: [{ type: "text" as const, text: `No indexable text files found in: ${params.path}` }], details: undefined };
       const result = await indexFiles(files, {});
       process.stderr.write(`\n`);
-      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s` }] };
+      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s` }], details: undefined };
     },
   });
 
   pi.registerTool({
     name: "rag_query",
+    label: "RAG query",
     description: "Search the local pi-local-rag index using hybrid BM25+vector search. Returns relevant chunks with file paths, line numbers, and relevance scores.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
@@ -748,10 +750,10 @@ export default function (pi: ExtensionAPI) {
     }),
     execute: async (_toolCallId, params) => {
       const index = loadIndex();
-      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }] };
+      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
       const results = await hybridSearch(params.query, index, params.limit ?? 10, config.ragAlpha);
-      if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }] };
+      if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(results.map(r => ({
         file: r.chunk.file,
         lines: `${r.chunk.lineStart}-${r.chunk.lineEnd}`,
@@ -759,12 +761,13 @@ export default function (pi: ExtensionAPI) {
         scores: { bm25: r.bm25.toFixed(3), vector: r.vector.toFixed(3), hybrid: r.hybrid.toFixed(3) },
         preview: r.chunk.content.slice(0, 300),
       })), null, 2);
-      return { content: [{ type: "text" as const, text }] };
+      return { content: [{ type: "text" as const, text }], details: undefined };
     },
   });
 
   pi.registerTool({
     name: "rag_status",
+    label: "RAG status",
     description: "Show pi-local-rag index statistics: file count, chunk count, vector coverage, embedding model, RAG config.",
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {
@@ -782,7 +785,7 @@ export default function (pi: ExtensionAPI) {
         ragConfig: config,
         storagePath: RAG_DIR,
       }, null, 2);
-      return { content: [{ type: "text" as const, text }] };
+      return { content: [{ type: "text" as const, text }], details: undefined };
     },
   });
 }
