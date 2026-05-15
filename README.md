@@ -33,6 +33,10 @@ pi install git:github.com/vahidkowsari/pi-local-rag
 | `/rag clear` | Wipe the entire index |
 | `/rag on` | Enable auto-injection |
 | `/rag off` | Disable auto-injection |
+| `/rag ext list` | List active indexable file extensions |
+| `/rag ext add <.ext>` | Add an extension (e.g. `.cs`, `.tex`, `.zig`) |
+| `/rag ext remove <.ext>` | Stop indexing files with this extension |
+| `/rag ext reset` | Restore the default extension list |
 
 ## AI Tools
 
@@ -62,3 +66,7 @@ Auto-injection is on by default. Tune via `/rag status`:
 | `ragTopK` | `5` | Max chunks to inject |
 | `ragScoreThreshold` | `0.1` | Min hybrid score to include |
 | `ragAlpha` | `0.4` | BM25/vector blend (0=pure vector, 1=pure BM25) |
+| `extraExtensions` | `[]` | Extra file extensions to index beyond the defaults |
+| `excludeExtensions` | `[]` | Default extensions to skip |
+
+The default extension list covers common source/markup/config files (`.ts`, `.tsx`, `.js`, `.py`, `.rs`, `.go`, `.java`, `.kt`, `.swift`, `.cs`, `.cpp`, `.rb`, `.php`, `.lua`, `.vue`, `.svelte`, `.md`, `.json`, `.yaml`, `.toml`, `.sql`, …). Use `/rag ext add <.ext>` to extend it for project-specific formats (e.g. `.tex`, `.zig`, `.nix`).

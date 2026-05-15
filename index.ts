@@ -10,6 +10,10 @@
  * /rag rebuild          → rebuild entire index
  * /rag clear            → clear index
  * /rag on|off           → toggle auto-injection
+ * /rag ext list         → list active file extensions
+ * /rag ext add <.ext>   → add an extra extension (e.g. .cs, .tex)
+ * /rag ext remove <.ext>→ remove an extension from the active set
+ * /rag ext reset        → restore default extensions
  *
  * Tools: rag_index, rag_query, rag_status
  */
@@ -34,11 +38,22 @@ const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", CYAN = "\x1b[36m", RED = "\x1b[31
 const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 const VECTOR_DIM = 384;
 
-export const TEXT_EXTS = new Set([
-  ".md", ".txt", ".ts", ".js", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h",
-  ".css", ".html", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".sh",
-  ".sql", ".graphql", ".proto", ".env", ".gitignore", ".dockerfile",
-]);
+export const DEFAULT_TEXT_EXTS = [
+  ".md", ".mdx", ".txt", ".rst",
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".rs", ".go", ".java", ".kt", ".kts", ".scala",
+  ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx",
+  ".cs", ".fs", ".vb",
+  ".swift", ".m", ".mm",
+  ".rb", ".php", ".pl", ".lua", ".dart", ".ex", ".exs", ".erl", ".clj", ".cljs", ".edn",
+  ".vue", ".svelte", ".astro",
+  ".css", ".scss", ".sass", ".less",
+  ".html", ".htm",
+  ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".xml", ".csv", ".tsv",
+  ".sh", ".bash", ".zsh", ".fish", ".ps1",
+  ".sql", ".graphql", ".gql", ".proto",
+  ".env", ".gitignore", ".dockerfile", ".tf", ".hcl",
+];
 
 const SKIP_DIRS = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__", ".venv", "venv", ".cache",
@@ -70,6 +85,8 @@ interface RagConfig {
   ragTopK: number;
   ragScoreThreshold: number;
   ragAlpha: number; // 0 = pure vector, 1 = pure BM25
+  extraExtensions: string[]; // user-added file extensions (e.g. [".cs", ".tex"])
+  excludeExtensions: string[]; // extensions to drop from the default set
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -83,7 +100,28 @@ export function loadConfig(): RagConfig {
 }
 
 function defaultConfig(): RagConfig {
-  return { ragEnabled: true, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4 };
+  return { ragEnabled: true, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4, extraExtensions: [], excludeExtensions: [] };
+}
+
+/** Normalize a user-supplied extension to lowercase ".ext" form. */
+export function normalizeExt(ext: string): string {
+  const trimmed = ext.trim().toLowerCase();
+  if (!trimmed) return "";
+  return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+}
+
+/** Build the effective extension allowlist from defaults + user config. */
+export function resolveExtensions(config: Pick<RagConfig, "extraExtensions" | "excludeExtensions">): Set<string> {
+  const set = new Set(DEFAULT_TEXT_EXTS);
+  for (const e of config.extraExtensions) {
+    const n = normalizeExt(e);
+    if (n) set.add(n);
+  }
+  for (const e of config.excludeExtensions) {
+    const n = normalizeExt(e);
+    if (n) set.delete(n);
+  }
+  return set;
 }
 
 export function saveConfig(config: RagConfig) {
@@ -199,8 +237,8 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
   return chunks;
 }
 
-export function collectFiles(dirPath: string, exts: Set<string> = TEXT_EXTS): string[] {
-  const allowed = exts;
+export function collectFiles(dirPath: string, exts?: Set<string>): string[] {
+  const allowed = exts ?? resolveExtensions(loadConfig());
   const files: string[] = [];
   function walk(dir: string) {
     try {
@@ -419,7 +457,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── /rag command ──
   pi.registerCommand("rag", {
-    description: "pi-local-rag: /rag index|search|status|rebuild|clear|on|off",
+    description: "pi-local-rag: /rag index|search|status|rebuild|clear|on|off|ext",
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/);
       const cmd = parts[0] || "status";
@@ -549,6 +587,50 @@ export default function (pi: ExtensionAPI) {
 
         const secs = (result.durationMs / 1000).toFixed(1);
         return `${GREEN}✅ Rebuilt:${RST} ${result.indexed} re-indexed │ ${result.skipped} unchanged │ ${deletedFiles.length} deleted │ ${result.chunks} chunks │ ${secs}s`;
+      }
+
+      // ── ext (configure file extensions) ──
+      if (cmd === "ext") {
+        const sub = (parts[1] || "list").toLowerCase();
+        const config = loadConfig();
+
+        if (sub === "list") {
+          const active = Array.from(resolveExtensions(config)).sort();
+          let out = `${B}${CYAN}Active file extensions${RST} ${D}(${active.length})${RST}\n`;
+          out += `  ${active.join(" ")}\n\n`;
+          if (config.extraExtensions.length) out += `  ${D}extra:   ${RST}${GREEN}${config.extraExtensions.join(" ")}${RST}\n`;
+          if (config.excludeExtensions.length) out += `  ${D}excluded:${RST} ${YELLOW}${config.excludeExtensions.join(" ")}${RST}\n`;
+          out += `\n${D}Edit via /rag ext add <.ext> / remove <.ext> / reset, or ${CONFIG_FILE}${RST}`;
+          return out;
+        }
+
+        if (sub === "add") {
+          const ext = normalizeExt(parts[2] || "");
+          if (!ext) return `${YELLOW}Usage:${RST} /rag ext add <.ext>`;
+          config.excludeExtensions = config.excludeExtensions.filter(e => normalizeExt(e) !== ext);
+          if (!config.extraExtensions.map(normalizeExt).includes(ext)) config.extraExtensions.push(ext);
+          saveConfig(config);
+          return `${GREEN}✅ Added ${ext} to indexable extensions.${RST} ${D}Run /rag index <path> to pick up matching files.${RST}`;
+        }
+
+        if (sub === "remove" || sub === "rm") {
+          const ext = normalizeExt(parts[2] || "");
+          if (!ext) return `${YELLOW}Usage:${RST} /rag ext remove <.ext>`;
+          const wasExtra = config.extraExtensions.map(normalizeExt).includes(ext);
+          config.extraExtensions = config.extraExtensions.filter(e => normalizeExt(e) !== ext);
+          if (!wasExtra && !config.excludeExtensions.map(normalizeExt).includes(ext)) config.excludeExtensions.push(ext);
+          saveConfig(config);
+          return `${GREEN}✅ Removed ${ext} from indexable extensions.${RST}`;
+        }
+
+        if (sub === "reset") {
+          config.extraExtensions = [];
+          config.excludeExtensions = [];
+          saveConfig(config);
+          return `${GREEN}✅ Extension list reset to defaults.${RST}`;
+        }
+
+        return `${YELLOW}Usage:${RST} /rag ext list|add <.ext>|remove <.ext>|reset`;
       }
 
       // ── clear ──

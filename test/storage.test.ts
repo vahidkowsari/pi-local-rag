@@ -29,6 +29,8 @@ test("loadConfig: returns defaults when no config file exists", () => {
   assert.equal(cfg.ragTopK, 5);
   assert.equal(cfg.ragScoreThreshold, 0.1);
   assert.equal(cfg.ragAlpha, 0.4);
+  assert.deepEqual(cfg.extraExtensions, []);
+  assert.deepEqual(cfg.excludeExtensions, []);
 });
 
 test("saveConfig / loadConfig round-trip persists every field", () => {
@@ -37,6 +39,8 @@ test("saveConfig / loadConfig round-trip persists every field", () => {
     ragTopK: 12,
     ragScoreThreshold: 0.25,
     ragAlpha: 0.7,
+    extraExtensions: [".cs", ".tex"],
+    excludeExtensions: [".md"],
   };
   saveConfig(written);
   const read = loadConfig();
