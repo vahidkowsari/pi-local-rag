@@ -38,6 +38,70 @@ pi install git:github.com/vahidkowsari/pi-local-rag
 | `/rag ext remove <.ext>` | Stop indexing files with this extension |
 | `/rag ext reset` | Restore the default extension list |
 
+## Example session
+
+```text
+$ /rag index ~/code/my-app
+Found 412 files to index
+Indexing  ████████████████████████  100%
+file:    src/server/handlers/payments.ts
+done:    412 embedded  0 unchanged
+✅ Indexed 412 files (1,847 chunks) · 0 unchanged · 38.4s
+
+$ /rag status
+🔍 pi-local-rag
+
+  Files indexed:    412
+  Chunks:           1847
+  Vectors:          1847  (100% coverage)
+  Total tokens:     438,219
+  Embedding model:  Xenova/all-MiniLM-L6-v2
+  Last build:       2026-05-15T20:14:03.221Z
+  Storage:          /Users/you/.pi/rag
+
+  RAG injection:    enabled  topK=5  threshold=0.1  alpha=0.4
+
+  File types:
+    .ts    231
+    .tsx   118
+    .md     34
+    .json   18
+    .yaml    7
+
+$ /rag search "stripe webhook signature verification"
+🔍 4 results for "stripe webhook signature verification"  hybrid BM25+vector
+
+payments.ts:142-187  score=0.92
+  export async function verifyStripeWebhook(req: Request) {
+    const sig = req.headers.get("stripe-signature");
+    if (!sig) throw new Error("missing signature header");
+
+webhooks.md:1-23  score=0.71
+  # Webhook signing
+  All inbound webhooks are verified against the shared secret stored in
+  STRIPE_WEBHOOK_SECRET. Stripe signs each request with a t= timestamp...
+
+stripe-client.ts:54-71  score=0.58
+  // Construct the event from the raw body and signature header
+  stripe.webhooks.constructEvent(rawBody, sig, secret);
+
+$ /rag ext add .zig
+Added .zig to indexable extensions. Run /rag index <path> to pick up matching files.
+
+$ /rag ext list
+Active file extensions  (61)
+  .astro .bash .c .cc .cjs .clj .cljs .cpp .cs .css .csv .cxx .dart .dockerfile
+  .edn .env .erl .ex .exs .fish .fs .gitignore .gql .graphql .h .hcl .hpp .htm
+  .html .hxx .ini .java .js .json .jsonc .jsx .kt .kts .less .lua .m .md .mdx
+  .mjs .mm .pl .php .ps1 .proto .py .rb .rs .rst .sass .scala .scss .sh .sql
+  .svelte .swift .tf .toml .ts .tsv .tsx .txt .vb .vue .xml .yaml .yml .zig .zsh
+  extra:    .zig
+
+  Edit via /rag ext add <.ext> / remove <.ext> / reset
+```
+
+> Output above is approximate — actual colors, spacing, and widget layout depend on your terminal theme and the Pi agent's UI.
+
 ## AI Tools
 
 The extension registers three tools the agent can call directly:
