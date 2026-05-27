@@ -22,10 +22,13 @@ import { load as loadVec } from "sqlite-vec";
 vi.mock("@xenova/transformers", () => ({
   pipeline: vi.fn().mockResolvedValue(
     vi.fn().mockImplementation(async (texts: string | string[]) => {
-      if (Array.isArray(texts)) {
-        return texts.map(() => ({ data: new Float32Array(384).fill(0.1) }));
-      }
-      return { data: new Float32Array(384).fill(0.1) };
+      // Mirror the real Xenova/transformers batch API: always return a single
+      // Tensor-like object whose `data` is a flat Float32Array of
+      // [batchSize × dim].  Single-string input is treated as batchSize=1.
+      const batch = Array.isArray(texts) ? texts : [texts];
+      const DIM = 384;
+      const flat = new Float32Array(batch.length * DIM).fill(0.1);
+      return { data: flat };
     })
   ),
 }));
