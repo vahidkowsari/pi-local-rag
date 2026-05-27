@@ -992,3 +992,139 @@ describe("ensureDir: legacy ~/.pi/lens → ~/.pi/rag migration (global store onl
     expect(existsSync(join(fakeHome, ".pi", "lens"))).toBe(false);
   });
 });
+
+// ─── isIndexStale ───────────────────────────────────────────────────────────
+
+import { isIndexStale } from "../index.ts";
+
+describe("isIndexStale", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const fresh = () => new Date(Date.now() - 60_000).toISOString();
+  const stale = () => new Date(Date.now() - DAY_MS - 1_000).toISOString();
+
+  it("returns false when lastBuild is empty", () => {
+    expect(isIndexStale({ chunks: [], files: {}, lastBuild: "" })).toBe(false);
+  });
+
+  it("returns false when index was built recently", () => {
+    expect(isIndexStale({ chunks: [], files: {}, lastBuild: fresh() })).toBe(false);
+  });
+
+  it("returns true when lastBuild is more than 24 h ago", () => {
+    expect(isIndexStale({ chunks: [], files: {}, lastBuild: stale() })).toBe(true);
+  });
+
+  it("respects a custom maxAgeMs", () => {
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1_000).toISOString();
+    expect(isIndexStale({ chunks: [], files: {}, lastBuild: tenMinAgo }, 5 * 60 * 1_000)).toBe(true);
+    expect(isIndexStale({ chunks: [], files: {}, lastBuild: tenMinAgo }, 15 * 60 * 1_000)).toBe(false);
+  });
+});
+
+// ─── before_agent_start auto-refresh ────────────────────────────────────────
+//
+// Exercises the 24h auto-refresh path. Uses vi.doMock to swap the embedder for
+// a fast stub (the real ONNX model is ~23 MB and slow to load). PI_RAG_DIR
+// pins storage to a throwaway dir so the hook can mutate the on-disk index
+// without touching the developer's real ~/.pi/rag.
+
+describe("before_agent_start: 24h auto-refresh", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  let ragDir: string;
+  let cwdSandbox: string;
+  let savedCwd: string;
+  let savedRagDir: string | undefined;
+  let extensionFactory: typeof import("../index.ts").default;
+
+  function makePi() {
+    let hookFn: ((event: any, ctx: any) => Promise<any>) | undefined;
+    const pi = {
+      on: (event: string, fn: any) => { if (event === "before_agent_start") hookFn = fn; },
+      registerCommand: () => {},
+      registerTool: () => {},
+    };
+    const fire = (event = { prompt: "hello world", systemPrompt: "" }) => hookFn!(event, {});
+    return { pi, fire };
+  }
+
+  function writeIndex(data: object) {
+    writeFileSync(join(ragDir, "index.json"), JSON.stringify(data));
+  }
+
+  function readIndexFile() {
+    return JSON.parse(readFileSync(join(ragDir, "index.json"), "utf-8"));
+  }
+
+  function fakeChunk(file: string) {
+    return {
+      id: "test", file, content: "const x = 1;", lineStart: 1, lineEnd: 1,
+      hash: "abc", indexed: new Date().toISOString(), tokens: 5,
+      vector: new Array(384).fill(0.1),
+    };
+  }
+
+  beforeAll(async () => {
+    ragDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-rag-refresh-")));
+    cwdSandbox = realpathSync(mkdtempSync(join(tmpdir(), "pi-rag-refresh-cwd-")));
+    savedCwd = process.cwd();
+    savedRagDir = process.env.PI_RAG_DIR;
+    process.env.PI_RAG_DIR = ragDir;
+    process.chdir(cwdSandbox);
+
+    // Stub the ONNX embedder so the auto-refresh runs in milliseconds.
+    vi.doMock("@xenova/transformers", () => ({
+      pipeline: async () => async () => ({ data: new Float32Array(384).fill(0.1) }),
+    }));
+
+    vi.resetModules();
+    ({ default: extensionFactory } = await import("../index.ts"));
+  });
+
+  afterAll(() => {
+    vi.doUnmock("@xenova/transformers");
+    process.chdir(savedCwd);
+    rmSync(ragDir, { recursive: true, force: true });
+    rmSync(cwdSandbox, { recursive: true, force: true });
+    if (savedRagDir !== undefined) process.env.PI_RAG_DIR = savedRagDir;
+    else delete process.env.PI_RAG_DIR;
+  });
+
+  it("does not update lastBuild when index is fresh", async () => {
+    const freshBuild = new Date(Date.now() - 60_000).toISOString();
+    writeIndex({ chunks: [fakeChunk("/some/file.ts")], files: {}, lastBuild: freshBuild });
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    await fire();
+    expect(readIndexFile().lastBuild).toBe(freshBuild);
+  });
+
+  it("updates lastBuild when index is stale and files exist on disk", async () => {
+    const testFile = join(cwdSandbox, "sample.ts");
+    writeFileSync(testFile, "export const answer = 42;\n");
+    const staleBuild = new Date(Date.now() - DAY_MS - 1_000).toISOString();
+    writeIndex({
+      chunks: [fakeChunk(testFile)],
+      files: { [testFile]: { hash: "old", chunks: 1, indexed: staleBuild, size: 26, embedded: true } },
+      lastBuild: staleBuild,
+    });
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    await fire();
+    const updated = readIndexFile();
+    expect(new Date(updated.lastBuild).getTime()).toBeGreaterThan(new Date(staleBuild).getTime());
+  });
+
+  it("does not update lastBuild when stale but all referenced files are gone", async () => {
+    const staleBuild = new Date(Date.now() - DAY_MS - 1_000).toISOString();
+    const missingFile = join(cwdSandbox, "deleted.ts");
+    writeIndex({
+      chunks: [fakeChunk(missingFile)],
+      files: { [missingFile]: { hash: "old", chunks: 1, indexed: staleBuild, size: 10, embedded: true } },
+      lastBuild: staleBuild,
+    });
+    const { pi, fire } = makePi();
+    extensionFactory(pi as any);
+    await fire();
+    expect(readIndexFile().lastBuild).toBe(staleBuild);
+  });
+});

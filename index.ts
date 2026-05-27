@@ -12,7 +12,8 @@
  * /rag search <query>   → hybrid search (BM25 + vector)
  * /rag find <glob>      → list indexed files matching a glob
  * /rag status           → show index stats
- * /rag rebuild          → re-embed tracked paths (picks up new files)
+ * /rag rebuild          → re-embed all tracked files (forced re-embed)
+ * /rag refresh          → incremental refresh (only new/changed files)
  * /rag clear            → clear index
  * /rag exclude <pat>    → add gitignore-style pattern (use -<pat> to remove; omit arg to list)
  * /rag on|off           → toggle auto-injection
@@ -47,7 +48,7 @@ import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./confi
 import { loadIndex, saveIndex } from "./index-store.ts";
 import { collectFiles, collectFromTracked, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
-import { indexFiles } from "./indexing.ts";
+import { indexFiles, isIndexStale } from "./indexing.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
@@ -63,6 +64,7 @@ export {
 export { embed, embedBatch } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
+export { isIndexStale } from "./indexing.ts";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
@@ -72,8 +74,23 @@ export default function (pi: ExtensionAPI) {
     const config = loadConfig();
     if (!config.ragEnabled) return;
 
-    const index = loadIndex();
+    let index = loadIndex();
     if (!index.chunks.length) return;
+
+    if (isIndexStale(index)) {
+      // Re-walk tracked paths so new files (and files of newly-supported
+      // extensions, e.g. PDF/DOCX added in a later version) are picked up.
+      // For pre-trackedPaths indexes, fall back to refreshing only known files.
+      const files = config.trackedPaths.length
+        ? collectFromTracked(config)
+        : Object.keys(index.files).filter(f => existsSync(f));
+      if (files.length) {
+        process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
+        await indexFiles(files);
+        process.stderr.write(`\r\x1b[2K`);
+        index = loadIndex();
+      }
+    }
 
     const results = await hybridSearch(event.prompt, index, config.ragTopK, config.ragAlpha);
     const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
@@ -105,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── /rag command ──
   pi.registerCommand("rag", {
-    description: "pi-local-rag: /rag index|search|find|status|rebuild|clear|exclude|on|off|ext",
+    description: "pi-local-rag: /rag index|search|find|status|rebuild|refresh|clear|exclude|on|off|ext",
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/);
       const cmd = parts[0] || "status";
@@ -275,6 +292,52 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // ── refresh (on-demand equivalent of the 24h auto-refresh) ──
+      if (cmd === "refresh") {
+        const config = loadConfig();
+        const index = loadIndex();
+        const files = config.trackedPaths.length
+          ? collectFromTracked(config)
+          : Object.keys(index.files).filter(f => existsSync(f));
+        if (!files.length) {
+          ctx.ui.notify("No tracked files to refresh. Run /rag index <path> first.", "warning");
+          return;
+        }
+
+        ctx.ui.notify(`Refreshing ${files.length} files...`, "info");
+
+        function progressBar(n: number, total: number, width = 24): string {
+          const filled = Math.round((n / total) * width);
+          return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
+        }
+
+        const result = await indexFiles(files, {
+          onFile(current, total, filename, skipped) {
+            const pct = Math.round((current / total) * 100);
+            const bar = progressBar(current, total);
+            ctx.ui.setStatus("rag", `■ Refreshing ${pct}% │ ${current}/${total} │ ${skipped} unchanged`);
+            ctx.ui.setWidget("rag", [
+              `${B}${CYAN}Refreshing${RST}  ${bar}  ${GREEN}${pct}%${RST}`,
+              `${D}file:    ${RST}${filename}`,
+              `${D}done:    ${RST}${GREEN}${current - skipped} new/changed${RST}  ${D}${skipped} unchanged${RST}`,
+            ]);
+          },
+          onChunk(ci, total, filename) {
+            ctx.ui.setStatus("rag", `■ Embedding ${filename} — chunk ${ci}/${total}`);
+          },
+          onSave() {
+            ctx.ui.setStatus("rag", `■ Saving index...`);
+          },
+        });
+
+        ctx.ui.setStatus("rag", undefined);
+        ctx.ui.setWidget("rag", undefined);
+
+        const secs = (result.durationMs / 1000).toFixed(1);
+        ctx.ui.notify(`✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks · ${secs}s`, "info");
+        return;
+      }
+
       // ── ext (configure file extensions) ──
       if (cmd === "ext") {
         const sub = (parts[1] || "list").toLowerCase();
@@ -421,7 +484,8 @@ export default function (pi: ExtensionAPI) {
           ["/rag search <query>",     "Hybrid BM25 + vector search over the index"],
           ["/rag find <glob>",        "List indexed files matching a glob (e.g. *.ts, src/*)"],
           ["/rag status",             "Show index stats and active configuration"],
-          ["/rag rebuild",            "Re-embed all tracked files; picks up new files in tracked paths"],
+          ["/rag rebuild",            "Re-embed all tracked files (forced; picks up new files)"],
+          ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
           ["/rag clear",              "Delete all indexed chunks"],
           ["/rag exclude <pattern>",  "Add a gitignore-style exclude pattern (omit to list; -<pattern> to remove)"],
           ["/rag ext list|add|remove|reset", "Manage the indexable file-extension allowlist"],

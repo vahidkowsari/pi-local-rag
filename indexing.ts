@@ -1,8 +1,14 @@
 import { basename } from "node:path";
 import { EMBEDDING_MODEL } from "./constants.ts";
-import { loadIndex, saveIndex } from "./index-store.ts";
+import { loadIndex, saveIndex, type IndexMeta } from "./index-store.ts";
 import { extractText, chunkText, sha256 } from "./chunking.ts";
 import { embedBatch } from "./embed.ts";
+
+/** True when the index's `lastBuild` timestamp is older than `maxAgeMs` (default 24 h). */
+export function isIndexStale(index: IndexMeta, maxAgeMs = 24 * 60 * 60 * 1000): boolean {
+  if (!index.lastBuild) return false;
+  return Date.now() - new Date(index.lastBuild).getTime() > maxAgeMs;
+}
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
