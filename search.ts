@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { embed } from "./embed.ts";
 import { float32ToBuffer } from "./db.ts";
-import { IndexMeta, Chunk } from "./db.ts";
+import { Chunk } from "./db.ts";
 
 export interface ScoredChunk {
   chunk: Chunk;
@@ -39,7 +39,6 @@ function l2ToCosine(l2Dist: number): number {
  */
 export async function hybridSearch(
   query: string,
-  _index: IndexMeta,
   limit = 10,
   alpha = 0.4,
   _db?: Database.Database

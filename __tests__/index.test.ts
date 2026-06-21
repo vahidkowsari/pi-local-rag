@@ -769,7 +769,7 @@ describe.skipIf(!ocrTools.available)("OCR end-to-end", () => {
 describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
   it("empty index → []", async () => {
     const db = createTestDb([]);
-    const results = await hybridSearch("query", { chunks: [], files: {}, lastBuild: "" }, 10, 0.4, db);
+    const results = await hybridSearch("query", 10, 0.4, db);
     db.close();
     expect(results).toEqual([]);
   });
@@ -779,7 +779,7 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
       { content: "function authenticate(user, password) { return checkCredentials(user, password); }" },
       { content: "function renderTemplate(html) { return sanitize(html); }" },
     ]);
-    const results = await hybridSearch("authenticate", { chunks: [], files: {}, lastBuild: "" }, 10, 1.0, db);
+    const results = await hybridSearch("authenticate", 10, 1.0, db);
     db.close();
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].chunk.content).toContain("authenticate");
@@ -787,7 +787,7 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
 
   it("non-matching query → no results", async () => {
     const db = createTestDb([{ content: "function computeSquareRoot(n) { return Math.sqrt(n); }" }]);
-    const results = await hybridSearch("unrelated query term xyz", { chunks: [], files: {}, lastBuild: "" }, 10, 1.0, db);
+    const results = await hybridSearch("unrelated query term xyz", 10, 1.0, db);
     db.close();
     const nonZero = results.filter(r => r.hybrid > 0);
     expect(nonZero.length).toBe(0);
@@ -798,7 +798,7 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
       { content: "function handle user authentication: validate token from request" },
       { content: "function handle request: process data from input" },
     ]);
-    const results = await hybridSearch("user authentication", { chunks: [], files: {}, lastBuild: "" }, 10, 1.0, db);
+    const results = await hybridSearch("user authentication", 10, 1.0, db);
     db.close();
     const first = results[0]?.chunk.content ?? "";
     expect(first).toContain("authentication");
@@ -809,14 +809,14 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
       content: `function processItem${i}(value) { return transform(value); }`,
     }));
     const db = createTestDb(chunks);
-    const results = await hybridSearch("function process", { chunks: [], files: {}, lastBuild: "" }, 3, 1.0, db);
+    const results = await hybridSearch("function process", 3, 1.0, db);
     db.close();
     expect(results.length).toBeLessThanOrEqual(3);
   });
 
   it("result shape has bm25, vector, hybrid, chunk fields", async () => {
     const db = createTestDb([{ content: "export function calculateTotal(items) { return items.reduce((a, b) => a + b, 0); }" }]);
-    const results = await hybridSearch("calculate total", { chunks: [], files: {}, lastBuild: "" }, 10, 1.0, db);
+    const results = await hybridSearch("calculate total", 10, 1.0, db);
     db.close();
     if (results.length > 0) {
       expect(results[0]).toHaveProperty("bm25");
@@ -831,7 +831,7 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
       { file: "/src/auth module", content: "export function login for user verification" },
       { file: "/src/render module", content: "export function display for user rendering" },
     ]);
-    const results = await hybridSearch("auth user", { chunks: [], files: {}, lastBuild: "" }, 10, 1.0, db);
+    const results = await hybridSearch("auth user", 10, 1.0, db);
     db.close();
     expect(results[0]?.chunk.file).toContain("auth");
   });
@@ -845,7 +845,7 @@ describe("hybridSearch with vectors", () => {
       { content: "handle user login with password verification and auth", vector: vec(0) },
       { content: "render the homepage template with context data", vector: vec(1) },
     ]);
-    const results = await hybridSearch("login", { chunks: [], files: {}, lastBuild: "" }, 10, 0.5, db);
+    const results = await hybridSearch("login", 10, 0.5, db);
     db.close();
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]).toHaveProperty("bm25");
@@ -858,7 +858,7 @@ describe("hybridSearch with vectors", () => {
       { content: "authenticate user credentials and verify identity", vector: vec(0) },
       { content: "logout session token and destroy active session", vector: vec(1) },
     ]);
-    const results = await hybridSearch("authenticate", { chunks: [], files: {}, lastBuild: "" }, 10, 0.5, db);
+    const results = await hybridSearch("authenticate", 10, 0.5, db);
     db.close();
     expect(results.length).toBeGreaterThan(0);
     const r = results[0];
@@ -871,7 +871,7 @@ describe("hybridSearch with vectors", () => {
       { content: "process payment amount through payment gateway charge" },
       { content: "refund order through payment gateway refund" },
     ]);
-    const results = await hybridSearch("payment", { chunks: [], files: {}, lastBuild: "" }, 10, 0.5, db);
+    const results = await hybridSearch("payment", 10, 0.5, db);
     db.close();
     if (results.length > 0) {
       expect(results[0].hybrid).toBe(results[0].bm25);

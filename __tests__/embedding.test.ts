@@ -87,7 +87,6 @@ describe("embed (real ONNX)", () => {
 
     const results = await hybridSearch(
       "How do leaves produce food from light?",
-      { chunks: [], files: {}, lastBuild: "" },
       3, 0, db,
     );
     db.close();

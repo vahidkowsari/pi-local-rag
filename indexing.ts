@@ -1,10 +1,9 @@
 import { basename } from "node:path";
 import Database from "better-sqlite3";
-import { openDb, float32ToBuffer } from "./db.ts";
+import { openDb, float32ToBuffer, type IndexStats } from "./db.ts";
 import { EMBEDDING_MODEL } from "./constants.ts";
 import { embedBatch } from "./embed.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
-import { IndexMeta } from "./db.ts";
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
@@ -17,7 +16,7 @@ export interface ProgressCallbacks {
   onSave?: () => void;
 }
 
-export function isIndexStale(index: IndexMeta, maxAgeMs = 24 * 60 * 60 * 1000): boolean {
+export function isIndexStale(index: IndexStats, maxAgeMs = 24 * 60 * 60 * 1000): boolean {
   if (!index.lastBuild) return false;
   return Date.now() - new Date(index.lastBuild).getTime() > maxAgeMs;
 }

@@ -46,7 +46,7 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { openDb, loadIndex, saveIndex, getIndexStats } from "./db.ts";
+import { openDb, loadIndex, getIndexedFiles, getEmbeddedCount, saveIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -85,12 +85,11 @@ export default function (pi: ExtensionAPI) {
 
     const database = openDb();
     try {
-      const stats = getIndexStats(database);
-      if (stats.totalChunks === 0) return;
+      const indexStats = getIndexStats(database);
+      if (indexStats.totalChunks === 0) return;
 
-      const indexMeta = { chunks: [], files: {}, lastBuild: stats.lastBuild, embeddingModel: stats.embeddingModel };
       const now = Date.now();
-      if (isIndexStale(indexMeta) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
+      if (isIndexStale(indexStats) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
         lastStaleCheckMs = now;
         // Re-walk tracked paths so new files (and files of newly-supported
         // extensions, e.g. PDF/DOCX added in a later version) are picked up.
@@ -105,7 +104,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      const results = await hybridSearch(event.prompt, indexMeta, config.ragTopK, config.ragAlpha, database);
+      const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
       const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
       if (!relevant.length) return;
 
@@ -220,13 +219,12 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "search") {
         const query = parts.slice(1).join(" ");
         if (!query) { ctx.ui.notify("Usage: /rag search <query>", "warning"); return; }
-        const index = loadIndex();
         const config = loadConfig();
-        const results = await hybridSearch(query, index, 10, config.ragAlpha);
+        const results = await hybridSearch(query, 10, config.ragAlpha);
         if (!results.length) { ctx.ui.notify(`No results for: ${query}`, "warning"); return; }
 
         const th = ctx.ui.theme;
-        const hasVectors = index.chunks.some(c => c.vector);
+        const hasVectors = getEmbeddedCount() > 0;
         const lines: string[] = [
           th.bold(th.fg("accent", "🔍 ") + `${results.length} results for "${query}"`) +
             "  " + th.fg("dim", hasVectors ? "hybrid BM25+vector" : "BM25 only"),
@@ -362,10 +360,10 @@ export default function (pi: ExtensionAPI) {
       // ── refresh (on-demand equivalent of the 24h auto-refresh) ──
       if (cmd === "refresh") {
         const config = loadConfig();
-        const index = loadIndex();
+        const filesFromDb = getIndexedFiles()
         const files = config.trackedPaths.length
           ? collectFromTracked(config)
-          : Object.keys(index.files).filter(f => existsSync(f));
+          : filesFromDb.map(f => f.path).filter(f => existsSync(f));
         if (!files.length) {
           ctx.ui.notify("No tracked files to refresh. Run /rag index <path> first.", "warning");
           return;
@@ -517,12 +515,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        const index = loadIndex();
+        const files = getIndexedFiles();
         const cwd = process.cwd();
         const ig = ignore().add([glob]);
 
         const matches: string[] = [];
-        for (const fp of Object.keys(index.files)) {
+        for (const fp of files.map(f => f.path)) {
           const rel = relative(cwd, fp);
           const candidate = rel && !rel.startsWith("..") ? rel : basename(fp);
           if (ig.ignores(candidate)) matches.push(fp);
@@ -571,12 +569,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── status (default) ──
-      const index = loadIndex();
+      const indexStats = getIndexStats()
       const config = loadConfig();
-      const fileCount = Object.keys(index.files).length;
-      const totalTokens = index.chunks.reduce((sum, c) => sum + c.tokens, 0);
-      const embeddedCount = index.chunks.filter(c => c.vector).length;
-      const vectorCoverage = index.chunks.length ? Math.round(embeddedCount / index.chunks.length * 100) : 0;
+      const fileCount = indexStats.totalFiles;
+      const totalTokens = indexStats.totalTokens;
+      const embeddedCount = indexStats.embeddedCount;
+      const vectorCoverage = indexStats.totalChunks ? Math.round(embeddedCount / indexStats.totalChunks * 100) : 0;
 
       const th = ctx.ui.theme;
       const label = (k: string) => th.fg("dim", k.padEnd(18));
@@ -587,11 +585,11 @@ export default function (pi: ExtensionAPI) {
         th.bold("🔍 pi-local-rag"),
         "",
         "  " + label("Files indexed:")  + val(fileCount),
-        "  " + label("Chunks:")         + val(index.chunks.length),
+        "  " + label("Chunks:")         + val(indexStats.totalChunks),
         "  " + label("Vectors:")        + val(embeddedCount) + "  " + th.fg("dim", `(${vectorCoverage}% coverage)`),
         "  " + label("Total tokens:")   + val(totalTokens.toLocaleString()),
-        "  " + label("Embedding model:") + th.fg("dim", index.embeddingModel || "none"),
-        "  " + label("Last build:")     + (index.lastBuild || th.fg("dim", "never")),
+        "  " + label("Embedding model:") + th.fg("dim", indexStats.embeddingModel || "none"),
+        "  " + label("Last build:")     + (indexStats.lastBuild || th.fg("dim", "never")),
         "  " + label("Storage:")        + th.fg("dim", `${ragDir} (${scope})`),
         "",
         "  " + label("RAG injection:")  +
@@ -601,8 +599,9 @@ export default function (pi: ExtensionAPI) {
 
       if (fileCount) {
         lines.push("", "  " + th.bold("File types:"));
+        const files = getIndexedFiles()
         const byExt: Record<string, number> = {};
-        for (const f of Object.keys(index.files)) byExt[extname(f)] = (byExt[extname(f)] || 0) + 1;
+        for (const f of files.map(f => f.path)) byExt[extname(f)] = (byExt[extname(f)] || 0) + 1;
         for (const [ext, count] of Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
           lines.push("    " + th.fg("muted", ext) + "  " + th.fg("dim", String(count)));
         }
@@ -665,7 +664,7 @@ export default function (pi: ExtensionAPI) {
       const index = loadIndex();
       if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
-      const results = await hybridSearch(params.query, index, params.limit ?? 10, config.ragAlpha);
+      const results = await hybridSearch(params.query, params.limit ?? 10, config.ragAlpha);
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(results.map(r => ({
         file: r.chunk.file,

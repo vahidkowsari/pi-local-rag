@@ -16,9 +16,26 @@ export interface Chunk {
   vector?: number[];
 }
 
+interface FileDbEntry {
+  path: string;
+  hash: string;
+  chunks: number;
+  indexed: string;
+  size: number;
+  embedded: number;
+}
+
+interface FileEntry {
+  hash: string;
+  chunks: number;
+  indexed: string;
+  size: number;
+  embedded: boolean;
+}
+
 export interface IndexMeta {
   chunks: Chunk[];
-  files: Record<string, { hash: string; chunks: number; indexed: string; size: number; embedded?: boolean }>;
+  files: Record<string, FileEntry>;
   lastBuild: string;
   embeddingModel?: string;
 }
@@ -156,26 +173,32 @@ export function float32ToBuffer(arr: number[]): Buffer {
   return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
 }
 
-export function getIndexStats(db: Database.Database): IndexStats {
-  const chunkRow = db.prepare(`
-    SELECT COUNT(*) as totalChunks,
-           COALESCE(SUM(tokens), 0) as totalTokens
-    FROM chunks
-  `).get() as { totalChunks: number; totalTokens: number };
+export function getIndexStats(db?: Database.Database): IndexStats {
+  const dbConn = db ?? getDb();
+  const shouldClose = !db;
+  try {
+    const chunkRow = dbConn.prepare(`
+      SELECT COUNT(*) as totalChunks,
+            COALESCE(SUM(tokens), 0) as totalTokens
+      FROM chunks
+    `).get() as { totalChunks: number; totalTokens: number };
 
-  const fileRow = db.prepare("SELECT COUNT(*) as totalFiles FROM files").get() as { totalFiles: number };
-  const vecRow = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
-  const lastBuild = db.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
-  const embeddingModel = db.prepare("SELECT value FROM metadata WHERE key = 'embedding_model'").get() as { value?: string } | undefined;
+    const fileRow = dbConn.prepare("SELECT COUNT(*) as totalFiles FROM files").get() as { totalFiles: number };
+    const vecRow = dbConn.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
+    const lastBuild = dbConn.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
+    const embeddingModel = dbConn.prepare("SELECT value FROM metadata WHERE key = 'embedding_model'").get() as { value?: string } | undefined;
 
-  return {
-    totalChunks: chunkRow.totalChunks,
-    totalFiles: fileRow.totalFiles,
-    totalTokens: chunkRow.totalTokens,
-    embeddedCount: vecRow.embeddedCount,
-    lastBuild: lastBuild?.value ?? "",
-    embeddingModel: embeddingModel?.value ?? "",
-  };
+    return {
+      totalChunks: chunkRow.totalChunks,
+      totalFiles: fileRow.totalFiles,
+      totalTokens: chunkRow.totalTokens,
+      embeddedCount: vecRow.embeddedCount,
+      lastBuild: lastBuild?.value ?? "",
+      embeddingModel: embeddingModel?.value ?? "",
+    };
+  } finally {
+    if (shouldClose) dbConn.close()
+  }
 }
 
 /** No-op shim — JSON-era callers (and tests) compile against this. SQLite
@@ -193,12 +216,10 @@ export function loadIndex(): IndexMeta {
       FROM chunks c
     `).all() as Chunk[];
 
-    const filesRaw = db.prepare("SELECT * FROM files").all() as Array<{
-      path: string; hash: string; chunks: number; indexed: string; size: number; embedded: number;
-    }>;
+    const filesRaw = db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>;
     const files: IndexMeta["files"] = {};
     for (const f of filesRaw) {
-      files[f.path] = { hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded };
+      files[f.path] = {hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded};
     }
 
     const lastBuild = db.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
@@ -209,6 +230,25 @@ export function loadIndex(): IndexMeta {
       lastBuild: lastBuild?.value ?? "",
       embeddingModel: embeddingModel?.value,
     };
+  } finally {
+    db.close();
+  }
+}
+
+export function getEmbeddedCount(): number {
+  const db = getDb();
+  try {
+    const vecRow = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
+    return vecRow.embeddedCount;
+  } finally {
+    db.close()
+  }
+}
+
+export function getIndexedFiles(): FileDbEntry[] {
+  const db = getDb();
+  try {
+    return (db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>);
   } finally {
     db.close();
   }
