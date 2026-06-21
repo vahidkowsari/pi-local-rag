@@ -120,6 +120,10 @@ export function initSchema(db: Database.Database) {
       size      INTEGER NOT NULL,
       embedded  INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Re-indexing deletes chunks per file (DELETE … WHERE file_path = ?);
+    -- without this index each delete full-scans the chunks table.
+    CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
 }
 

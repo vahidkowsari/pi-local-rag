@@ -155,7 +155,10 @@ export async function hybridSearch(
       const vecNorm = vecNormMap.get(rowid) ?? 0;
 
       let bm25Final = bm25Norm;
-      if (c.file_path.toLowerCase().includes(terms[0] ?? "")) {
+      // Boost when the first meaningful query term appears in the file path.
+      // Guard on terms[0]: an empty/short query makes includes("") always true,
+      // which would spuriously boost every result.
+      if (terms[0] && c.file_path.toLowerCase().includes(terms[0])) {
         bm25Final = Math.min(1, bm25Final * 1.5);
       }
 
