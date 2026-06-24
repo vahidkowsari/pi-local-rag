@@ -186,6 +186,7 @@ export async function indexFiles(
     `);
 
     let chunked = 0;
+    const indexedAt = new Date().toISOString();
     const tx = database.transaction(() => {
       for (const fw of toIndex) {
         const vectors = fw._vectors;
@@ -194,7 +195,7 @@ export async function indexFiles(
           const chunkResult = insChunk.run(
             `${sha256(fw.fp)}-${c.lineStart}`,
             fw.fp, c.content, c.lineStart, c.lineEnd, c.hash,
-            new Date().toISOString(),
+            indexedAt,
             Math.ceil(c.content.length / 4),
           );
           if (vectors?.[j]) {
@@ -202,7 +203,7 @@ export async function indexFiles(
           }
           chunked++;
         }
-        upsertFile.run(fw.fp, fw.hash, fw.rawChunks.length, new Date().toISOString(), fw.size, 1);
+        upsertFile.run(fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, 1);
       }
     });
 

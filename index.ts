@@ -46,7 +46,7 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { openDb, loadIndex, getIndexedFiles, getEmbeddedCount, saveIndex, getIndexStats } from "./db.ts";
+import { openDb, getIndexedFiles, getEmbeddedCount, saveIndex, getIndexStats } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
         // For pre-trackedPaths indexes, fall back to refreshing only known files.
         const files = config.trackedPaths.length
           ? collectFromTracked(config)
-          : Object.keys(loadIndex().files).filter(f => existsSync(f));
+          : getIndexedFiles(database).map(f => f.path).filter(f => existsSync(f));
         if (files.length) {
           process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
           await indexFiles(files, undefined, database);
@@ -360,7 +360,7 @@ export default function (pi: ExtensionAPI) {
       // ── refresh (on-demand equivalent of the 24h auto-refresh) ──
       if (cmd === "refresh") {
         const config = loadConfig();
-        const filesFromDb = getIndexedFiles()
+        const filesFromDb = getIndexedFiles();
         const files = config.trackedPaths.length
           ? collectFromTracked(config)
           : filesFromDb.map(f => f.path).filter(f => existsSync(f));
@@ -569,7 +569,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── status (default) ──
-      const indexStats = getIndexStats()
+      const statusDb = openDb();
+      try {
+      const indexStats = getIndexStats(statusDb);
       const config = loadConfig();
       const fileCount = indexStats.totalFiles;
       const totalTokens = indexStats.totalTokens;
@@ -599,7 +601,7 @@ export default function (pi: ExtensionAPI) {
 
       if (fileCount) {
         lines.push("", "  " + th.bold("File types:"));
-        const files = getIndexedFiles()
+        const files = getIndexedFiles(statusDb);
         const byExt: Record<string, number> = {};
         for (const f of files.map(f => f.path)) byExt[extname(f)] = (byExt[extname(f)] || 0) + 1;
         for (const [ext, count] of Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
@@ -622,6 +624,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.setWidget("rag-status", lines);
+      } finally {
+        statusDb.close();
+      }
     },
   });
 
@@ -661,8 +666,7 @@ export default function (pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
     }),
     execute: async (_toolCallId, params) => {
-      const index = loadIndex();
-      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
+      if (getIndexStats().totalChunks === 0) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
       const results = await hybridSearch(params.query, params.limit ?? 10, config.ragAlpha);
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
@@ -683,17 +687,16 @@ export default function (pi: ExtensionAPI) {
     description: "Show pi-local-rag index statistics: file count, chunk count, vector coverage, embedding model, RAG config.",
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {
-      const index = loadIndex();
+      const stats = getIndexStats();
       const config = loadConfig();
-      const embeddedCount = index.chunks.filter(c => c.vector).length;
       const text = JSON.stringify({
-        files: Object.keys(index.files).length,
-        chunks: index.chunks.length,
-        vectorsEmbedded: embeddedCount,
-        vectorCoverage: index.chunks.length ? `${Math.round(embeddedCount / index.chunks.length * 100)}%` : "0%",
-        embeddingModel: index.embeddingModel ?? "none",
-        totalTokens: index.chunks.reduce((s, c) => s + c.tokens, 0),
-        lastBuild: index.lastBuild || "never",
+        files: stats.totalFiles,
+        chunks: stats.totalChunks,
+        vectorsEmbedded: stats.embeddedCount,
+        vectorCoverage: stats.totalChunks ? `${Math.round(stats.embeddedCount / stats.totalChunks * 100)}%` : "0%",
+        embeddingModel: stats.embeddingModel || "none",
+        totalTokens: stats.totalTokens,
+        lastBuild: stats.lastBuild || "never",
         ragConfig: config,
         storagePath: getRagDir(),
         storageScope: getRagDir() === GLOBAL_RAG_DIR() ? "global" : "project",

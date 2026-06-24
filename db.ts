@@ -120,6 +120,10 @@ export function initSchema(db: Database.Database) {
       size      INTEGER NOT NULL,
       embedded  INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Re-indexing deletes chunks per file (DELETE … WHERE file_path = ?);
+    -- without this index each delete full-scans the chunks table.
+    CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
 }
 
@@ -197,7 +201,7 @@ export function getIndexStats(db?: Database.Database): IndexStats {
       embeddingModel: embeddingModel?.value ?? "",
     };
   } finally {
-    if (shouldClose) dbConn.close()
+    if (shouldClose) dbConn.close();
   }
 }
 
@@ -219,7 +223,7 @@ export function loadIndex(): IndexMeta {
     const filesRaw = db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>;
     const files: IndexMeta["files"] = {};
     for (const f of filesRaw) {
-      files[f.path] = {hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded};
+      files[f.path] = { hash: f.hash, chunks: f.chunks, indexed: f.indexed, size: f.size, embedded: !!f.embedded };
     }
 
     const lastBuild = db.prepare("SELECT value FROM metadata WHERE key = 'last_build'").get() as { value?: string } | undefined;
@@ -235,21 +239,23 @@ export function loadIndex(): IndexMeta {
   }
 }
 
-export function getEmbeddedCount(): number {
-  const db = getDb();
+export function getEmbeddedCount(db?: Database.Database): number {
+  const dbConn = db ?? getDb();
+  const shouldClose = !db;
   try {
-    const vecRow = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
+    const vecRow = dbConn.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
     return vecRow.embeddedCount;
   } finally {
-    db.close()
+    if (shouldClose) dbConn.close();
   }
 }
 
-export function getIndexedFiles(): FileDbEntry[] {
-  const db = getDb();
+export function getIndexedFiles(db?: Database.Database): FileDbEntry[] {
+  const dbConn = db ?? getDb();
+  const shouldClose = !db;
   try {
-    return (db.prepare("SELECT * FROM files").all() as Array<FileDbEntry>);
+    return dbConn.prepare("SELECT * FROM files").all() as FileDbEntry[];
   } finally {
-    db.close();
+    if (shouldClose) dbConn.close();
   }
 }
