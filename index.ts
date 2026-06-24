@@ -565,9 +565,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // ── status (default) ──
-      const statusDb = getDbConn();
-      try {
-      const indexStats = getIndexStats(statusDb);
+      const indexStats = getIndexStats();
       const config = loadConfig();
       const fileCount = indexStats.totalFiles;
       const totalTokens = indexStats.totalTokens;
@@ -620,9 +618,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.setWidget("rag-status", lines);
-      } finally {
-        statusDb.close();
-      }
     },
   });
 
