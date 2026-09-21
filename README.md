@@ -45,7 +45,7 @@ The OCR fallback is silent when these tools aren't installed (logs one stderr hi
 | `/rag search <query>` | Hybrid BM25 + vector search over the index |
 | `/rag find <glob>` | List indexed files matching a glob (e.g. `*.ts`, `src/*`) |
 | `/rag status` | Show index stats, active config, tracked paths, exclude patterns, storage scope |
-| `/rag rebuild [--force]` | Re-walk tracked paths and re-embed all files. `--force` wipes the DB and bypasses the hash-cache check |
+| `/rag rebuild [--force]` | Re-walk tracked paths and re-embed all files. `--force` bypasses the hash skip; a failed rebuild keeps the previous index |
 | `/rag refresh` | Incremental refresh — only new/changed files (same code path as the 24 h auto-refresh) |
 | `/rag clear` | Wipe the entire index (tracked paths are preserved) |
 | `/rag exclude <pattern>` | Add a gitignore-style exclude pattern; `/rag exclude -<pattern>` to remove; no arg to list |

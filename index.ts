@@ -59,8 +59,12 @@ import { indexFiles, isIndexStale } from "./indexing.ts";
 // working (tests, downstream code that imports from the package root).
 export { DEFAULT_TEXT_EXTS } from "./constants.ts";
 export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
-export type { RagConfig } from "./config.ts";
-export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
+export type { RagConfig, EmbeddingConfig, RerankerConfig, HttpConfig } from "./config.ts";
+export {
+  loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions,
+  validateConfig, applyEnvOverrides, voyageApiKey,
+  DEFAULT_VOYAGE_EMBED_MODEL, DEFAULT_VOYAGE_EMBED_DIM, DEFAULT_VOYAGE_RERANK_MODEL,
+} from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
 export {
   getDbConn, closeDbConn, getFreshDbConn, openDb, getDb,
@@ -71,6 +75,10 @@ export {
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
 export { embed, embedBatch } from "./embed.ts";
+export type { EmbeddingProvider, EmbedBatchOptions } from "./providers/embedding/types.ts";
+export { LocalEmbeddingProvider, getLocalEmbeddingProvider } from "./providers/embedding/local.ts";
+export { VoyageEmbeddingProvider } from "./providers/embedding/voyage.ts";
+export { createEmbeddingProvider } from "./providers/embedding/factory.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";

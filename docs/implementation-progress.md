@@ -47,7 +47,7 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 ## A3 — Keep old index on failure
 
 - Status: **done**
-- Commit: this commit on `feat/cloud-research-rag`
+- Commit: `693de2f`
 - Changes:
   - `indexFiles` no longer deletes live chunks/vectors before embedding.
   - Embeddings are validated (count, dimension, finite, non-zero norm) then each file is replaced in its own transaction.
@@ -57,6 +57,24 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 - Unverified: real ONNX model crash path (mocked embedBatch).
 - Next: B1 LocalEmbeddingProvider.
 
-## B–E
+## B1 — LocalEmbeddingProvider
+
+- Status: **done** (this commit)
+- Local MiniLM wrapped as `LocalEmbeddingProvider`; `embed.ts` is a facade (`embed` → `embedQuery`, `embedBatch` → `embedDocuments`). Default still Xenova/all-MiniLM-L6-v2 / 384-d.
+
+## B2 — Config and factory
+
+- Status: **done** (this commit)
+- Nested `embedding` / `reranker` / `http` defaults merge over old config files. `PI_RAG_*` env overrides saved config; `saveConfig` does not write env overlays or keys. `VOYAGE_API_KEY` is env-only. Factory builds local by default; voyage requires a key.
+
+## B3 — VoyageEmbeddingProvider
+
+- Status: **done** (this commit)
+- HTTP mock tests cover query/document `input_type`, index mapping, 401 no-retry, 429 Retry-After, empty input, abort, refuse-to-truncate.
+- Smoke: `npm run smoke:voyage-embed` (exits 0 with UNVERIFIED when no key).
+- Unverified: live Voyage API (no key in this environment).
+- Next: C1 dynamic dimensions, fingerprint, rebuild/switch.
+
+## C–E
 
 - Status: **not started**

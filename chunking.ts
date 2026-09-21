@@ -89,7 +89,7 @@ export function collectFiles(
   return files;
 }
 
-export function collectFromTracked(cfg: RagConfig): string[] {
+export function collectFromTracked(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): string[] {
   const out = new Set<string>();
   for (const p of cfg.trackedPaths) {
     if (!existsSync(p)) continue;
@@ -167,7 +167,7 @@ export async function collectFilesAsync(
   return files;
 }
 
-export async function collectFromTrackedAsync(cfg: RagConfig): Promise<string[]> {
+export async function collectFromTrackedAsync(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): Promise<string[]> {
   const out = new Set<string>();
   for (const p of cfg.trackedPaths) {
     if (!existsSync(p)) continue;

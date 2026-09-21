@@ -1009,6 +1009,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
   let saveConfig: typeof import("../index.ts").saveConfig;
   let loadIndex: typeof import("../index.ts").loadIndex;
   let saveIndex: typeof import("../index.ts").saveIndex;
+  let defaultConfig: typeof import("../index.ts").defaultConfig;
 
   beforeAll(async () => {
     ragDir = mkdtempSync(join(tmpdir(), "pi-rag-storage-"));
@@ -1020,7 +1021,7 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
 
     vi.resetModules();
     const mod = await import("../index.ts");
-    ({ loadConfig, saveConfig, loadIndex, saveIndex } = mod);
+    ({ loadConfig, saveConfig, loadIndex, saveIndex, defaultConfig } = mod);
   });
 
   afterAll(() => {
@@ -1040,10 +1041,15 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
     expect(cfg.excludeExtensions).toEqual([]);
     expect(cfg.trackedPaths).toEqual([]);
     expect(cfg.excludePatterns).toEqual([]);
+    expect(cfg.embedding).toEqual({ provider: "local", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384 });
+    expect(cfg.reranker.provider).toBe("none");
+    expect(cfg.candidateTopK).toBe(30);
+    expect(cfg.cloudAutoRefresh).toBe(false);
   });
 
   it("saveConfig / loadConfig round-trip persists every field", () => {
     const written = {
+      ...defaultConfig(),
       ragEnabled: false,
       ragTopK: 12,
       ragScoreThreshold: 0.25,

@@ -221,5 +221,6 @@ describe("local pack listing", () => {
     expect(paths).toContain("repository.ts");
     expect(paths).toContain("index.ts");
     expect(paths).toContain("db.ts");
+    expect(paths).toContain("providers/embedding/local.ts");
   });
 });

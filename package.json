@@ -18,6 +18,8 @@
     "search.ts",
     "indexing.ts",
     "repository.ts",
+    "providers/**/*.ts",
+    "scripts/**/*.ts",
     "types/**/*.d.ts",
     "README.md",
     "CHANGELOG.md",
@@ -28,7 +30,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "smoke:voyage-embed": "node --experimental-strip-types scripts/voyage-embed-smoke.ts"
   },
   "keywords": [
     "pi-package",
