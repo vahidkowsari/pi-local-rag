@@ -1,8 +1,13 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
-import { getRagDir, dbFile, legacyIndexFile, ensureDir } from "./store.ts";
+import { getRagDir, legacyIndexFile, ensureDir } from "./store.ts";
+import { resolveActiveDbPath } from "./index-manager.ts";
 import * as repo from "./repository.ts";
+import { loadConfig } from "./config.ts";
+import { VECTOR_DIM } from "./constants.ts";
+import { checkIndexCompatibility } from "./index-manager.ts";
 
 export interface Chunk {
   id: string;
@@ -37,6 +42,11 @@ export interface IndexStats {
   embeddedCount: number;
   lastBuild: string;
   embeddingModel: string;
+  embeddingFingerprint?: string;
+  processingFingerprint?: string;
+  embeddingDimensions?: number;
+  needsRebuild?: boolean;
+  rebuildReason?: string;
 }
 
 export class RagDatabase {
@@ -68,12 +78,14 @@ export class RagDatabase {
   static open(ragDir?: string): Database.Database {
     const dir = ragDir ?? getRagDir();
     ensureDir(dir);
-    const path = dbFile(dir);
+    const path = resolveActiveDbPath(dir);
+    const isNew = !existsSync(path);
     const db = new Database(path);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     loadVec(db);
-    repo.initSchema(db);
+    const dim = isNew ? loadConfig().embedding.dimensions : (repo.detectVectorDimensions(db) ?? VECTOR_DIM);
+    repo.initSchema(db, dim);
 
     const legacyPath = legacyIndexFile(dir);
     if (existsSync(legacyPath)) {
@@ -109,8 +121,19 @@ export const getDb = getDbConn;
 
 export { float32ToBuffer } from "./repository.ts";
 
-export function initSchema(db: Database.Database) {
-  repo.initSchema(db);
+export function initSchema(db: Database.Database, dimensions?: number) {
+  repo.initSchema(db, dimensions);
+}
+
+/** Open a database at an explicit path (staging indexes). Caller closes it. */
+export function openDbAt(path: string, dimensions: number): Database.Database & Disposable {
+  ensureDir(dirname(path));
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  loadVec(db);
+  repo.initSchema(db, dimensions);
+  return Object.assign(db, { [Symbol.dispose]: () => db.close() });
 }
 
 function migrateFromJson(db: Database.Database, jsonPath: string): void {
@@ -152,6 +175,8 @@ function migrateFromJson(db: Database.Database, jsonPath: string): void {
 export function getIndexStats(db?: Database.Database): IndexStats {
   const dbConn = db ?? getDbConn();
   const { totalChunks, totalTokens } = repo.getChunkStats(dbConn);
+  const compat = checkIndexCompatibility(dbConn, loadConfig());
+  const dim = repo.detectVectorDimensions(dbConn);
 
   return {
     totalChunks: totalChunks,
@@ -160,6 +185,11 @@ export function getIndexStats(db?: Database.Database): IndexStats {
     embeddedCount: repo.getEmbeddedCount(dbConn),
     lastBuild: repo.getMetadata(dbConn, repo.MetadataKey.LastBuild) ?? "",
     embeddingModel: repo.getMetadata(dbConn, repo.MetadataKey.EmbeddingModel) ?? "",
+    embeddingFingerprint: repo.getMetadata(dbConn, repo.MetadataKey.EmbeddingFingerprint),
+    processingFingerprint: repo.getMetadata(dbConn, repo.MetadataKey.ProcessingFingerprint),
+    embeddingDimensions: dim,
+    needsRebuild: compat.ok ? false : true,
+    rebuildReason: compat.ok ? undefined : compat.reason,
   };
 }
 

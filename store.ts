@@ -63,8 +63,13 @@ export function getRagDir(opts: { createIfMissing?: boolean } = {}): string {
   return global;
 }
 
-/** SQLite database file (post-migration). */
+/** SQLite database file (legacy default when no active manifest exists). */
 export function dbFile(ragDir: string): string { return join(ragDir, "rag.db"); }
+export function indexesDir(ragDir: string): string { return join(ragDir, "indexes"); }
+export function indexDbFile(ragDir: string, indexId: string): string {
+  return join(indexesDir(ragDir), indexId, "rag.db");
+}
+export function activeManifestFile(ragDir: string): string { return join(ragDir, "active.json"); }
 /** Legacy JSON index, kept for the one-shot auto-migration in getFreshDbConn. */
 export function legacyIndexFile(ragDir: string): string { return join(ragDir, "index.json"); }
 /** @deprecated use dbFile/legacyIndexFile. Kept temporarily for callers that still reach for the JSON path. */

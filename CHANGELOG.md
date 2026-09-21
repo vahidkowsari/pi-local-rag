@@ -6,6 +6,7 @@
 - **A2: BM25 direction**: FTS5 `bm25()` is lower-is-better; internal scores now invert that range so a strong keyword hit ranks first and is not mapped to 0 and filtered.
 - **A3: safe reindex**: old chunks/vectors stay until embeddings validate and a per-file transaction replaces them. Failed embeds, bad dimensions, and force-rebuild errors keep the previous searchable index.
 - **B1–B3: embedding providers**: `LocalEmbeddingProvider` wraps MiniLM; config grows nested `embedding`/`reranker`/`http` with `PI_RAG_*` env overlays; `VoyageEmbeddingProvider` talks to `POST /v1/embeddings` with `input_type` query/document. Default remains local. Cloud is not wired into the production index yet.
+- **C1–C2: fingerprint + dynamic dimensions**: each index records embedding and processing fingerprints. Model/dimension changes rebuild into `indexes/<id>/rag.db` and publish `active.json` only after a successful build. Queries embed with the active index's provider.
 
 ## 0.4.1
 

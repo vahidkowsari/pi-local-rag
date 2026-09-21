@@ -18,6 +18,8 @@
     "search.ts",
     "indexing.ts",
     "repository.ts",
+    "fingerprint.ts",
+    "index-manager.ts",
     "providers/**/*.ts",
     "scripts/**/*.ts",
     "types/**/*.d.ts",

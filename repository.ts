@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { VECTOR_DIM } from "./constants.ts";
+import { safeVectorDimensions } from "./fingerprint.ts";
 
 /**
  * Centralizes every raw SQL statement used across db.ts, indexing.ts,
@@ -16,7 +17,8 @@ import { VECTOR_DIM } from "./constants.ts";
 
 // ─── Schema ──────────────────────────────────────────────────────────────
 
-export function initSchema(db: Database.Database) {
+export function initSchema(db: Database.Database, dimensions: number = VECTOR_DIM) {
+  const dim = safeVectorDimensions(dimensions);
   db.exec(`DROP TRIGGER IF EXISTS chunks_ai; DROP TRIGGER IF EXISTS chunks_ad;`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS metadata (
@@ -51,7 +53,7 @@ export function initSchema(db: Database.Database) {
     END;
 
     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-      embedding float[${VECTOR_DIM}]
+      embedding float[${dim}]
     );
 
     CREATE TABLE IF NOT EXISTS files (
@@ -67,6 +69,9 @@ export function initSchema(db: Database.Database) {
     -- without this index each delete full-scans the chunks table.
     CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
+  if (!getMetadata(db, MetadataKey.EmbeddingDimensions)) {
+    setMetadata(db, MetadataKey.EmbeddingDimensions, String(dim));
+  }
 }
 
 // ─── Chunks ──────────────────────────────────────────────────────────────
@@ -265,6 +270,9 @@ export function countFiles(db: Database.Database): number {
 export const MetadataKey = {
   LastBuild: "last_build",
   EmbeddingModel: "embedding_model",
+  EmbeddingFingerprint: "embedding_fingerprint",
+  ProcessingFingerprint: "processing_fingerprint",
+  EmbeddingDimensions: "embedding_dimensions",
 } as const;
 
 export type MetadataKey = typeof MetadataKey[keyof typeof MetadataKey];
@@ -286,4 +294,16 @@ export function getChunkStats(db: Database.Database): { totalChunks: number; tot
 
 export function countChunksTotal(db: Database.Database): number {
   return (db.prepare("SELECT COUNT(*) as c FROM chunks").get() as { c: number }).c;
+}
+
+/** Read stored or observed vector table dimension. */
+export function detectVectorDimensions(db: Database.Database): number | undefined {
+  const meta = getMetadata(db, MetadataKey.EmbeddingDimensions);
+  if (meta) {
+    const n = Number(meta);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  const row = db.prepare("SELECT embedding FROM chunks_vec LIMIT 1").get() as { embedding?: Buffer } | undefined;
+  if (row?.embedding) return row.embedding.byteLength / 4;
+  return undefined;
 }

@@ -75,6 +75,19 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 - Unverified: live Voyage API (no key in this environment).
 - Next: C1 dynamic dimensions, fingerprint, rebuild/switch.
 
-## C–E
+## C1 — Dynamic dimensions, fingerprint, rebuild/switch
+
+- Status: **done** (this commit)
+- `initSchema(db, dimensions)` builds sqlite-vec with a validated integer dim. Active index selected via `active.json` (atomic rename). Legacy `rag.db` remains until a successful switch. Unfingerprinted non-empty indexes require `/rag rebuild --force`.
+
+## C2 — Index/query provider wiring
+
+- Status: **done** (this commit)
+- Indexing uses `createEmbeddingProvider` / `embeddingProviderForIndex`. Query uses the active fingerprint's provider (`embedQuery`). `rag_status` reports wanted vs active model/dim and rebuild reason.
+- Tests: `__tests__/fingerprint.test.ts`. `SKIP_EMBEDDING_TESTS=1 npm test` → 153 passed, 4 skipped.
+- Unverified: live Voyage 384→1024 rebuild (no API key).
+- Next: D1 unified retrieval.
+
+## D–E
 
 - Status: **not started**

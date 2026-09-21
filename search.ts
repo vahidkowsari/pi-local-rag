@@ -1,7 +1,8 @@
 import type Database from "better-sqlite3";
-import { embed } from "./embed.ts";
 import { getDbConn, type Chunk } from "./db.ts";
 import * as repo from "./repository.ts";
+import { embeddingProviderForIndex } from "./providers/embedding/factory.ts";
+import { loadConfig } from "./config.ts";
 
 export interface ScoredChunk {
   chunk: Chunk;
@@ -68,8 +69,8 @@ export async function hybridSearch(
   const ftsLimit = Math.max(limit * 20, 200);
   const ftsResults = repo.searchFts(database, ftsQuery, ftsLimit);
 
-  // Vector via sqlite-vec
-  const queryVec = await embed(query);
+  // Vector via sqlite-vec — use the provider that matches the active index.
+  const queryVec = await embeddingProviderForIndex(database, loadConfig()).embedQuery(query);
   const vecLimit = Math.max(limit * 10, 100);
   const vecResults = repo.searchVectors(database, queryVec, vecLimit);
 

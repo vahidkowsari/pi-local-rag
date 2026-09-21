@@ -53,7 +53,7 @@ import {
 } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
-import { indexFiles, isIndexStale } from "./indexing.ts";
+import { indexFiles, isIndexStale, rebuildWithSwitch } from "./indexing.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
@@ -81,7 +81,7 @@ export { VoyageEmbeddingProvider } from "./providers/embedding/voyage.ts";
 export { createEmbeddingProvider } from "./providers/embedding/factory.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
-export { isIndexStale, indexFiles } from "./indexing.ts";
+export { isIndexStale, indexFiles, rebuildWithSwitch } from "./indexing.ts";
 export type { ProgressCallbacks, IndexFilesResult } from "./indexing.ts";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
@@ -273,7 +273,6 @@ export default function (pi: ExtensionAPI) {
         const rebuildArgs = parts.slice(1);
         const force = rebuildArgs.includes("--force");
 
-        const database = getDbConn();
         const config = loadConfig();
         const indexedFileSet = new Set(listIndexedFilePaths());
 
@@ -321,7 +320,7 @@ export default function (pi: ExtensionAPI) {
             return CYAN + "█".repeat(filled) + D + "░".repeat(width - filled) + RST;
           }
 
-          const result = await indexFiles(targetFiles, {
+          const result = await rebuildWithSwitch(targetFiles, {
             onFile(current, total, filename, skipped) {
               const pct = Math.round((current / total) * 100);
               const bar = progressBar(current, total);
@@ -347,7 +346,7 @@ export default function (pi: ExtensionAPI) {
             onSave() {
               ctx.ui.setStatus("rag", `■ Saving index...`);
             },
-          }, database, force);
+          }, force);
 
           ctx.ui.setStatus("rag", undefined);
           ctx.ui.setWidget("rag", undefined);
@@ -549,7 +548,7 @@ export default function (pi: ExtensionAPI) {
           ["/rag search <query>",     "Hybrid BM25 + vector search over the index"],
           ["/rag find <glob>",        "List indexed files matching a glob (e.g. *.ts, src/*)"],
           ["/rag status",             "Show index stats and active configuration"],
-          ["/rag rebuild [--force]",  "Re-embed tracked files; --force wipes DB and bypasses hash skip"],
+          ["/rag rebuild [--force]",  "Re-embed tracked files; --force bypasses hash skip and switches index if the embedding contract changed"],
           ["/rag refresh",            "Incremental refresh — only new/changed files (also fires automatically every 24h)"],
           ["/rag clear",              "Delete all indexed chunks"],
           ["/rag exclude <pattern>",  "Add a gitignore-style exclude pattern (omit to list; -<pattern> to remove)"],
@@ -590,6 +589,10 @@ export default function (pi: ExtensionAPI) {
         "  " + label("Vectors:")        + val(embeddedCount) + "  " + th.fg("dim", `(${vectorCoverage}% coverage)`),
         "  " + label("Total tokens:")   + val(totalTokens.toLocaleString()),
         "  " + label("Embedding model:") + th.fg("dim", stats.embeddingModel || "none"),
+        "  " + label("Wanted model:")   + th.fg("dim", `${config.embedding.provider}/${config.embedding.model} ${config.embedding.dimensions}d`),
+        "  " + label("Active dims:")    + th.fg("dim", String(stats.embeddingDimensions ?? "unknown")),
+        "  " + label("Rebuild needed:") + (stats.needsRebuild ? th.fg("warning", "yes") : th.fg("success", "no")),
+        ...(stats.needsRebuild && stats.rebuildReason ? ["  " + th.fg("warning", stats.rebuildReason)] : []),
         "  " + label("Last build:")     + (stats.lastBuild || th.fg("dim", "never")),
         "  " + label("Storage:")        + th.fg("dim", `${ragDir} (${scope})`),
         "",
@@ -692,6 +695,11 @@ export default function (pi: ExtensionAPI) {
         vectorsEmbedded: embeddedCount,
         vectorCoverage: stats.totalChunks ? `${Math.round(embeddedCount / stats.totalChunks * 100)}%` : "0%",
         embeddingModel: stats.embeddingModel || "none",
+        wantedEmbedding: config.embedding,
+        activeFingerprint: stats.embeddingFingerprint || null,
+        activeDimensions: stats.embeddingDimensions ?? null,
+        needsRebuild: !!stats.needsRebuild,
+        rebuildReason: stats.rebuildReason || null,
         totalTokens: stats.totalTokens,
         lastBuild: stats.lastBuild || "never",
         ragConfig: config,

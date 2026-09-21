@@ -1381,6 +1381,14 @@ describe("before_agent_start: 24h auto-refresh", () => {
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(opts.filePath, opts.fileHash ?? "old", 1, opts.lastBuild, 10, 1);
       db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('last_build', ?)").run(opts.lastBuild);
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_model', ?)").run("Xenova/all-MiniLM-L6-v2");
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_fingerprint', ?)").run(JSON.stringify({
+        provider: "local", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384, contract: "l2-unit-v1",
+      }));
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('processing_fingerprint', ?)").run(JSON.stringify({
+        parser: "extract-v1", chunker: "lines-v1", maxLines: 50,
+      }));
+      db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_dimensions', ?)").run("384");
     } finally {
       db.close();
     }

@@ -1,10 +1,19 @@
 import { basename } from "node:path";
 import type Database from "better-sqlite3";
-import { getDbConn, type IndexStats } from "./db.ts";
-import { EMBEDDING_MODEL, VECTOR_DIM } from "./constants.ts";
-import { embedBatch } from "./embed.ts";
+import { getDbConn, closeDbConn, openDbAt, type IndexStats } from "./db.ts";
+import { VECTOR_DIM } from "./constants.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
 import * as repo from "./repository.ts";
+import { loadConfig } from "./config.ts";
+import { createEmbeddingProvider, embeddingProviderForIndex } from "./providers/embedding/factory.ts";
+import {
+  checkIndexCompatibility, stampFingerprints, withIndexWriteLock,
+  prepareStagingDir, publishActiveManifest, checkpointAndClose,
+} from "./index-manager.ts";
+import { getRagDir } from "./store.ts";
+import {
+  CHUNK_MAX_LINES, embeddingFingerprintFromConfig, processingFingerprintFromConfig, serializeFingerprint,
+} from "./fingerprint.ts";
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
@@ -58,11 +67,11 @@ function isValidVector(v: number[] | undefined, dim = VECTOR_DIM): v is number[]
   return normSq > 0;
 }
 
-function fileVectorsReady(fw: FileWork): boolean {
+function fileVectorsReady(fw: FileWork, dim: number): boolean {
   if (fw.rawChunks.length === 0) return true;
   const vectors = fw._vectors;
   if (!vectors || vectors.length !== fw.rawChunks.length) return false;
-  return vectors.every(v => isValidVector(v));
+  return vectors.every(v => isValidVector(v, dim));
 }
 
 function replaceFileIndex(database: Database.Database, fw: FileWork, indexedAt: string): number {
@@ -93,6 +102,55 @@ export async function indexFiles(
   _db?: Database.Database,
   force?: boolean,
 ): Promise<IndexFilesResult> {
+  return withIndexWriteLock(() => indexFilesUnlocked(paths, progress, _db, force));
+}
+
+export async function rebuildWithSwitch(
+  paths: string[],
+  progress?: ProgressCallbacks,
+  force?: boolean,
+): Promise<IndexFilesResult> {
+  return withIndexWriteLock(async () => {
+    const config = loadConfig();
+    const ragDir = getRagDir();
+    const live = getDbConn();
+    const compat = checkIndexCompatibility(live, config);
+    if (compat.ok) {
+      return indexFilesUnlocked(paths, progress, live, force);
+    }
+    const spec = prepareStagingDir(config, ragDir);
+    const staging = openDbAt(spec.dbPath, config.embedding.dimensions);
+    try {
+      const result = await indexFilesUnlocked(paths, progress, staging, true);
+      if (result.failed > 0) {
+        checkpointAndClose(staging);
+        return result;
+      }
+      stampFingerprints(staging, config);
+      checkpointAndClose(staging);
+      publishActiveManifest(ragDir, {
+        version: 1,
+        indexId: spec.indexId,
+        relativeDbPath: spec.relativeDbPath,
+        embeddingFingerprint: serializeFingerprint(embeddingFingerprintFromConfig(config.embedding)),
+        processingFingerprint: serializeFingerprint(processingFingerprintFromConfig(config)),
+        createdAt: new Date().toISOString(),
+      });
+      closeDbConn();
+      return result;
+    } catch (err) {
+      try { staging.close(); } catch { /* ignore */ }
+      throw err;
+    }
+  });
+}
+
+async function indexFilesUnlocked(
+  paths: string[],
+  progress?: ProgressCallbacks,
+  _db?: Database.Database,
+  force?: boolean,
+): Promise<IndexFilesResult> {
   const hadCallbacks = !!progress;
   if (hadCallbacks) _suppressStderr = true;
   const database = _db ?? getDbConn();
@@ -104,6 +162,18 @@ export async function indexFiles(
 
   try {
     if (total === 0) return empty();
+
+    const config = loadConfig();
+    const compat = checkIndexCompatibility(database, config);
+    if (!compat.ok) {
+      return {
+        indexed: 0, chunks: 0, skipped: 0, failed: paths.length,
+        errors: [compat.reason], durationMs: Date.now() - startMs,
+      };
+    }
+    const provider = compat.empty
+      ? createEmbeddingProvider(config)
+      : embeddingProviderForIndex(database, config);
 
     // Phase 1: parallel read + chunk; DB ops on main thread
     const CONCURRENCY = 32;
@@ -129,7 +199,7 @@ export async function indexFiles(
           if (i >= paths.length) { producersDone++; if (producersDone >= workerCount) { readQueueDone = true; notifyRead(); } return; }
           try {
             const { text, hash, size } = await extractText(paths[i]);
-            const raw = chunkText(text);
+            const raw = chunkText(text, CHUNK_MAX_LINES);
             readQueue.push({ fp: paths[i], hash, size, raw });
             notifyRead();
           } catch {
@@ -196,7 +266,7 @@ export async function indexFiles(
       if (groupChunks.length === 0) return;
       const texts = groupChunks.map(g => g.fw.rawChunks[g.ci].content);
       stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
-      const vectors = await embedBatch(texts);
+      const vectors = await provider.embedDocuments(texts);
       if (!Array.isArray(vectors) || vectors.length !== texts.length) {
         throw new Error(`embedBatch returned ${Array.isArray(vectors) ? vectors.length : "non-array"} vectors for ${texts.length} texts`);
       }
@@ -239,7 +309,7 @@ export async function indexFiles(
     const errors: string[] = [];
     const indexedAt = new Date().toISOString();
     for (const fw of toIndex) {
-      if (!fileVectorsReady(fw)) {
+      if (!fileVectorsReady(fw, provider.dimensions)) {
         errors.push(`${fw.fp}: missing or invalid embedding vectors; keeping previous index`);
         continue;
       }
@@ -256,7 +326,8 @@ export async function indexFiles(
     progress?.onSave?.();
     if (indexed > 0 || (toIndex.length === 0 && errors.length === 0)) {
       repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
-      repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
+      repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, provider.model);
+      stampFingerprints(database, config);
     }
 
     return { indexed, chunks: chunked, skipped, failed: errors.length, errors, durationMs: Date.now() - startMs };

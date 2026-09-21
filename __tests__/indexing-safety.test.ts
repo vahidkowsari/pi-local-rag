@@ -15,10 +15,14 @@ function unitVec(seed = 1): number[] {
   return v.map(x => x / n);
 }
 
-vi.mock("../embed.ts", () => ({
-  embed: vi.fn(async () => unitVec(1)),
-  embedBatch: vi.fn(async (texts: string[]) => texts.map(() => unitVec(1))),
-  BATCH_SIZE: 64,
+vi.mock("@xenova/transformers", () => ({
+  pipeline: vi.fn().mockResolvedValue(
+    vi.fn().mockImplementation(async (texts: string | string[]) => {
+      const batch = Array.isArray(texts) ? texts : [texts];
+      const flat = new Float32Array(batch.length * DIM).fill(0.1);
+      return { data: flat };
+    }),
+  ),
 }));
 
 describe("indexFiles replacement safety", () => {
@@ -27,7 +31,7 @@ describe("indexFiles replacement safety", () => {
   let savedCwd: string;
   let savedRagDir: string | undefined;
   let mod: typeof import("../index.ts");
-  let embedBatch: ReturnType<typeof vi.fn>;
+  let embedDocuments: ReturnType<typeof vi.spyOn>;
 
   beforeAll(async () => {
     ragDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-rag-safe-")));
@@ -38,12 +42,14 @@ describe("indexFiles replacement safety", () => {
     process.chdir(proj);
     vi.resetModules();
     mod = await import("../index.ts");
-    ({ embedBatch } = await import("../embed.ts") as unknown as { embedBatch: ReturnType<typeof vi.fn> });
+    const { LocalEmbeddingProvider } = await import("../providers/embedding/local.ts");
+    embedDocuments = vi.spyOn(LocalEmbeddingProvider.prototype, "embedDocuments");
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
   });
 
   afterEach(async () => {
-    embedBatch.mockReset();
-    embedBatch.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
+    embedDocuments.mockReset();
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
     const { closeDbConn } = await import("../db.ts");
     closeDbConn();
   });
@@ -91,15 +97,15 @@ describe("indexFiles replacement safety", () => {
     return results.map(r => r.chunk.content);
   }
 
-  it("unchanged file is skipped with zero embedBatch calls", async () => {
+  it("unchanged file is skipped with zero embedDocuments calls", async () => {
     const fp = join(proj, "stable.ts");
     writeFileSync(fp, "export const stableMarkerAlpha = 1;\n");
     await mod.indexFiles([fp]);
-    embedBatch.mockClear();
+    embedDocuments.mockClear();
     const r = await mod.indexFiles([fp]);
     expect(r.skipped).toBe(1);
     expect(r.indexed).toBe(0);
-    expect(embedBatch).toHaveBeenCalledTimes(0);
+    expect(embedDocuments).toHaveBeenCalledTimes(0);
   });
 
   it("modifying one file re-embeds only that file", async () => {
@@ -109,12 +115,12 @@ describe("indexFiles replacement safety", () => {
     writeFileSync(b, "export const changeMarkerOriginal = 1;\n");
     await mod.indexFiles([a, b]);
     writeFileSync(b, "export const changeMarkerUpdated = 2;\n");
-    embedBatch.mockClear();
+    embedDocuments.mockClear();
     const r = await mod.indexFiles([a, b]);
     expect(r.indexed).toBe(1);
     expect(r.skipped).toBe(1);
-    expect(embedBatch).toHaveBeenCalledTimes(1);
-    const embeddedTexts = (embedBatch.mock.calls[0][0] as string[]).join("\n");
+    expect(embedDocuments).toHaveBeenCalledTimes(1);
+    const embeddedTexts = (embedDocuments.mock.calls[0][0] as string[]).join("\n");
     expect(embeddedTexts).toContain("changeMarkerUpdated");
     expect(embeddedTexts).not.toContain("keepMarkerOriginal");
     expect(chunkContents(a).join("\n")).toContain("keepMarkerOriginal");
@@ -127,12 +133,13 @@ describe("indexFiles replacement safety", () => {
     await mod.indexFiles([fp]);
     expect(chunkCount(fp)).toBeGreaterThan(0);
     writeFileSync(fp, "export const liveMarkerBroken = 2;\n");
-    embedBatch.mockImplementation(async () => { throw new Error("model down"); });
+    embedDocuments.mockImplementation(async () => { throw new Error("model down"); });
     const r = await mod.indexFiles([fp]);
     expect(r.indexed).toBe(0);
     expect(r.failed).toBe(1);
     expect(fileRow(fp)?.embedded).toBe(1);
     expect(chunkContents(fp).join("\n")).toContain("liveMarkerOriginal");
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
     const hits = await searchable("liveMarkerOriginal");
     expect(hits.some(c => c.includes("liveMarkerOriginal"))).toBe(true);
     expect(hits.some(c => c.includes("liveMarkerBroken"))).toBe(false);
@@ -146,7 +153,7 @@ describe("indexFiles replacement safety", () => {
     const lines = Array.from({ length: 50 * 300 }, (_, i) => `export const batchLine${i} = ${i}; batchMarkerNew`);
     writeFileSync(fp, lines.join("\n") + "\n");
     let calls = 0;
-    embedBatch.mockImplementation(async (texts: string[]) => {
+    embedDocuments.mockImplementation(async (texts: string[]) => {
       calls++;
       if (calls >= 2) throw new Error("second batch failed");
       return texts.map(() => unitVec(1));
@@ -164,7 +171,7 @@ describe("indexFiles replacement safety", () => {
     writeFileSync(fp, "export const dimMarkerOriginal = 1;\n");
     await mod.indexFiles([fp]);
     writeFileSync(fp, "export const dimMarkerNew = 2;\n");
-    embedBatch.mockImplementation(async (texts: string[]) => texts.map(() => [0.1, 0.2]));
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => [0.1, 0.2]));
     const r = await mod.indexFiles([fp]);
     expect(r.indexed).toBe(0);
     expect(r.failed).toBe(1);
@@ -178,7 +185,7 @@ describe("indexFiles replacement safety", () => {
     writeFileSync(fp, "export const nanMarkerOriginal = 1;\n");
     await mod.indexFiles([fp]);
     writeFileSync(fp, "export const nanMarkerNew = 2;\n");
-    embedBatch.mockImplementation(async (texts: string[]) => texts.map(() => {
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => {
       const v = unitVec(1);
       v[3] = Number.NaN;
       return v;
@@ -217,12 +224,12 @@ describe("indexFiles replacement safety", () => {
     writeFileSync(fp, "export const forceMarkerOriginal = 1;\n");
     await mod.indexFiles([fp]);
     writeFileSync(fp, "export const forceMarkerNew = 2;\n");
-    embedBatch.mockImplementation(async () => { throw new Error("model down"); });
+    embedDocuments.mockImplementation(async () => { throw new Error("model down"); });
     const failed = await mod.indexFiles([fp], undefined, undefined, true);
     expect(failed.indexed).toBe(0);
     expect(failed.failed).toBe(1);
     expect(chunkContents(fp).join("\n")).toContain("forceMarkerOriginal");
-    embedBatch.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
+    embedDocuments.mockImplementation(async (texts: string[]) => texts.map(() => unitVec(1)));
     const ok = await mod.indexFiles([fp], undefined, undefined, true);
     expect(ok.indexed).toBe(1);
     expect(chunkContents(fp).join("\n")).toContain("forceMarkerNew");
