@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import type Database from "better-sqlite3";
 import { getDbConn, type IndexStats } from "./db.ts";
-import { EMBEDDING_MODEL } from "./constants.ts";
+import { EMBEDDING_MODEL, VECTOR_DIM } from "./constants.ts";
 import { embedBatch } from "./embed.ts";
 import { chunkText, extractText, sha256 } from "./chunking.ts";
 import * as repo from "./repository.ts";
@@ -39,22 +39,71 @@ interface FileWork {
   _vectors?: number[][];
 }
 
+export interface IndexFilesResult {
+  indexed: number;
+  chunks: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+  durationMs: number;
+}
+
+function isValidVector(v: number[] | undefined, dim = VECTOR_DIM): v is number[] {
+  if (!v || v.length !== dim) return false;
+  let normSq = 0;
+  for (const x of v) {
+    if (!Number.isFinite(x)) return false;
+    normSq += x * x;
+  }
+  return normSq > 0;
+}
+
+function fileVectorsReady(fw: FileWork): boolean {
+  if (fw.rawChunks.length === 0) return true;
+  const vectors = fw._vectors;
+  if (!vectors || vectors.length !== fw.rawChunks.length) return false;
+  return vectors.every(v => isValidVector(v));
+}
+
+function replaceFileIndex(database: Database.Database, fw: FileWork, indexedAt: string): number {
+  return database.transaction(() => {
+    repo.deleteVectorsForFile(database, fw.fp);
+    repo.deleteChunksForFile(database, fw.fp);
+    let n = 0;
+    const vectors = fw._vectors;
+    for (let j = 0; j < fw.rawChunks.length; j++) {
+      const c = fw.rawChunks[j];
+      const chunkResult = repo.insertChunk(database, {
+        id: `${sha256(fw.fp)}-${c.lineStart}`,
+        filePath: fw.fp, content: c.content,
+        lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
+        indexedAt, tokens: Math.ceil(c.content.length / 4),
+      });
+      repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors![j]);
+      n++;
+    }
+    repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
+    return n;
+  })();
+}
+
 export async function indexFiles(
   paths: string[],
   progress?: ProgressCallbacks,
   _db?: Database.Database,
   force?: boolean,
-): Promise<{ indexed: number; chunks: number; skipped: number; durationMs: number }> {
+): Promise<IndexFilesResult> {
   const hadCallbacks = !!progress;
   if (hadCallbacks) _suppressStderr = true;
   const database = _db ?? getDbConn();
   const startMs = Date.now();
   const total = paths.length;
+  const empty = (): IndexFilesResult => ({
+    indexed: 0, chunks: 0, skipped: 0, failed: 0, errors: [], durationMs: Date.now() - startMs,
+  });
 
   try {
-    if (total === 0) {
-      return { indexed: 0, chunks: 0, skipped: 0, durationMs: Date.now() - startMs };
-    }
+    if (total === 0) return empty();
 
     // Phase 1: parallel read + chunk; DB ops on main thread
     const CONCURRENCY = 32;
@@ -109,8 +158,8 @@ export async function indexFiles(
           continue;
         }
 
-        repo.deleteVectorsForFile(database, r.fp);
-        repo.deleteChunksForFile(database, r.fp);
+        // Do not delete the live rows here. Old chunks/vectors stay searchable
+        // until a validated replacement commits in replaceFileIndex.
 
         const rawChunks = r.raw.map(c => ({ ...c, hash: sha256(c.content) }));
         stderrProgress(`[${processedCount}/${total}] chunked ${name} (${rawChunks.length} chunks)`);
@@ -148,6 +197,9 @@ export async function indexFiles(
       const texts = groupChunks.map(g => g.fw.rawChunks[g.ci].content);
       stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
       const vectors = await embedBatch(texts);
+      if (!Array.isArray(vectors) || vectors.length !== texts.length) {
+        throw new Error(`embedBatch returned ${Array.isArray(vectors) ? vectors.length : "non-array"} vectors for ${texts.length} texts`);
+      }
       for (let vi = 0; vi < groupChunks.length; vi++) {
         const g = groupChunks[vi];
         g.fw._vectors ??= new Array(g.fw.rawChunks.length);
@@ -159,46 +211,55 @@ export async function indexFiles(
       await yield_();
     };
 
+    try {
+      for (const fw of toIndex) {
+        for (let j = 0; j < fw.rawChunks.length; j++) {
+          groupChunks.push({ fw, ci: j });
+          globalChunkIdx++;
+          if (groupChunks.length >= EMBED_GROUP_TARGET) await flushGroup();
+        }
+      }
+      await flushGroup();
+    } catch (err) {
+      // Embed failed before any replacement transaction. Live index is unchanged.
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        indexed: 0,
+        chunks: 0,
+        skipped,
+        failed: toIndex.length,
+        errors: toIndex.map(fw => `${fw.fp}: ${msg}`),
+        durationMs: Date.now() - startMs,
+      };
+    }
+
+    // Phase 3: replace each file in its own transaction only after vectors validate.
+    let chunked = 0;
+    let indexed = 0;
+    const errors: string[] = [];
+    const indexedAt = new Date().toISOString();
     for (const fw of toIndex) {
-      for (let j = 0; j < fw.rawChunks.length; j++) {
-        groupChunks.push({ fw, ci: j });
-        globalChunkIdx++;
-        if (groupChunks.length >= EMBED_GROUP_TARGET) await flushGroup();
+      if (!fileVectorsReady(fw)) {
+        errors.push(`${fw.fp}: missing or invalid embedding vectors; keeping previous index`);
+        continue;
+      }
+      try {
+        chunked += replaceFileIndex(database, fw, indexedAt);
+        indexed++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${fw.fp}: ${msg}`);
       }
     }
-    await flushGroup();
-
-    // Phase 3: insert chunks + vectors into DB
-    let chunked = 0;
-    const indexedAt = new Date().toISOString();
-    const tx = database.transaction(() => {
-      for (const fw of toIndex) {
-        const vectors = fw._vectors;
-        for (let j = 0; j < fw.rawChunks.length; j++) {
-          const c = fw.rawChunks[j];
-          const chunkResult = repo.insertChunk(database, {
-            id: `${sha256(fw.fp)}-${c.lineStart}`,
-            filePath: fw.fp, content: c.content,
-            lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
-            indexedAt, tokens: Math.ceil(c.content.length / 4),
-          });          
-          if (vectors?.[j]) {
-            repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors[j]);
-          }
-          chunked++;
-        }
-        repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
-      }
-    });
-
-    tx();
 
     if (!hadCallbacks) process.stderr.write(`\r\x1b[2K`);
     progress?.onSave?.();
-    repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
-    repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
+    if (indexed > 0 || (toIndex.length === 0 && errors.length === 0)) {
+      repo.setMetadata(database, repo.MetadataKey.LastBuild, new Date().toISOString());
+      repo.setMetadata(database, repo.MetadataKey.EmbeddingModel, EMBEDDING_MODEL);
+    }
 
-    return { indexed: toIndex.length, chunks: chunked, skipped, durationMs: Date.now() - startMs };
+    return { indexed, chunks: chunked, skipped, failed: errors.length, errors, durationMs: Date.now() - startMs };
   } finally {
     if (hadCallbacks) _suppressStderr = false;
   }

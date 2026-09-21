@@ -74,7 +74,7 @@ export { embed, embedBatch } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";
-export type { ProgressCallbacks } from "./indexing.ts";
+export type { ProgressCallbacks, IndexFilesResult } from "./indexing.ts";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
@@ -292,14 +292,10 @@ export default function (pi: ExtensionAPI) {
           // Files in the index but no longer present (deleted, excluded, or untracked).
           const droppedFiles = [...indexedFileSet].filter(f => !targetSet.has(f));
           for (const f of droppedFiles) pruneIndexedFile(f);
-          if (force) {
-            // --force: wipe everything and rebuild the FTS index. indexFiles
-            // will then insert fresh rows for every targetFile, bypassing the
-            // skip-on-equal-hash check.
-            // A3 will move this wipe into the replacement transaction so a
-            // failed force-rebuild keeps the previous index.
-            clearIndex(database);
-          } else {
+          // --force bypasses the hash skip inside indexFiles. Do not wipe the
+          // live index first: each file is replaced in a transaction after
+          // embeddings validate, so a failed rebuild keeps the old rows.
+          if (!force) {
             for (const f of targetFiles) markFileUnembedded(f);
           }
 

@@ -35,7 +35,7 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 ## A2 — BM25 direction
 
 - Status: **done**
-- Commit: this commit on `feat/cloud-research-rag`
+- Commit: `6beb81b`
 - Changes:
   - `bm25ToRelevance()` inverts FTS5 `bm25()` (lower/more-negative = better) onto [0, 1].
   - Equal scores and a single candidate map to 1 so a lone hit is not filtered as `hybrid=0`.
@@ -46,7 +46,16 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 
 ## A3 — Keep old index on failure
 
-- Status: **not started**
+- Status: **done**
+- Commit: this commit on `feat/cloud-research-rag`
+- Changes:
+  - `indexFiles` no longer deletes live chunks/vectors before embedding.
+  - Embeddings are validated (count, dimension, finite, non-zero norm) then each file is replaced in its own transaction.
+  - Embed/validation/write failures leave the previous file rows searchable and do not set a false `embedded=true`.
+  - `/rag rebuild --force` no longer wipes the DB first.
+- Tests: `__tests__/indexing-safety.test.ts`. `SKIP_EMBEDDING_TESTS=1 npm test` → 127 passed, 4 skipped. `npm run typecheck` → pass.
+- Unverified: real ONNX model crash path (mocked embedBatch).
+- Next: B1 LocalEmbeddingProvider.
 
 ## B–E
 

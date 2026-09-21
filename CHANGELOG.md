@@ -4,6 +4,7 @@
 
 - **A1: module interface sync**: `index.ts` now calls `hybridSearch(query, limit, alpha)` and `isIndexStale(IndexStats)`. Public DB access is `getDbConn()` (singleton, closed by `closeDbConn()`) and `getFreshDbConn()` (caller-owned). `openDb`/`getDb` remain aliases of `getDbConn`. Closing the singleton handle no longer permanently poisons later `getDbConn()` calls. `/rag clear` actually wipes SQLite instead of calling the no-op `saveIndex`. `package.json` `files` includes `repository.ts`. TypeScript 5.7.3 is a locked devDependency.
 - **A2: BM25 direction**: FTS5 `bm25()` is lower-is-better; internal scores now invert that range so a strong keyword hit ranks first and is not mapped to 0 and filtered.
+- **A3: safe reindex**: old chunks/vectors stay until embeddings validate and a per-file transaction replaces them. Failed embeds, bad dimensions, and force-rebuild errors keep the previous searchable index.
 
 ## 0.4.1
 
