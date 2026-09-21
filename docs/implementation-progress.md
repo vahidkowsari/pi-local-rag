@@ -88,6 +88,14 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 - Unverified: live Voyage 384→1024 rebuild (no API key).
 - Next: D1 unified retrieval.
 
-## D–E
+## D1–D3 — retrieval, reranker, context
 
-- Status: **not started**
+- Status: **done** (this commit)
+- `retrieve()` is the shared entry for `/rag search`, `rag_query`, and auto-inject. NoneReranker keeps order. Voyage rerank maps by index; failures fall back to hybrid order. `buildContext` counts wrapper text with an estimated tokenizer.
+
+## E1–E4 — parse, chunk, metadata, eval
+
+- Status: **done** (this commit)
+- `extractBlocks` + `chunkBlocks`; PDF `pageStart` is 1-based physical page; markdown pages stay null. Chunk IDs use `sha256(path)-chunkIndex`. Eval set: `eval/questions.json` (20), runner does not invent cloud numbers.
+- Tests: `SKIP_EMBEDDING_TESTS=1 npm test` → 161 passed, 4 skipped. `npm run typecheck` → pass.
+- Unverified: live Voyage embed/rerank, live Pi, real research PDF spot-check, eval metrics on a labeled corpus.

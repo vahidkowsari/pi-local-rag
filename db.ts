@@ -18,6 +18,9 @@ export interface Chunk {
   hash: string;
   indexed: string;
   tokens: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
 }
 
 interface FileEntry {

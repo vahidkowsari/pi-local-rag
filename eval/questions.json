@@ -1,0 +1,22 @@
+[
+  {"id": "q01", "query": "What is hybrid BM25 plus vector search?", "acceptable": [{"file": "README.md", "snippet": "Hybrid BM25 + vector"}]},
+  {"id": "q02", "query": "How do I index a directory?", "acceptable": [{"file": "README.md", "snippet": "/rag index"}]},
+  {"id": "q03", "query": "Where is the global RAG store?", "acceptable": [{"file": "README.md", "snippet": "~/.pi/rag"}]},
+  {"id": "q04", "query": "What embedding model is the local default?", "acceptable": [{"file": "README.md", "snippet": "all-MiniLM-L6-v2"}]},
+  {"id": "q05", "query": "How to skip embedding tests?", "acceptable": [{"file": "README.md", "snippet": "SKIP_EMBEDDING_TESTS"}]},
+  {"id": "q06", "query": "OCR fallback tools", "acceptable": [{"file": "README.md", "snippet": "tesseract"}]},
+  {"id": "q07", "query": "What does rag_query return?", "acceptable": [{"file": "index.ts", "snippet": "rag_query"}]},
+  {"id": "q08", "query": "FTS5 BM25 direction", "acceptable": [{"file": "search.ts", "snippet": "bm25ToRelevance"}]},
+  {"id": "q09", "query": "sqlite-vec dimension", "acceptable": [{"file": "constants.ts", "snippet": "VECTOR_DIM"}]},
+  {"id": "q10", "query": "Voyage input_type query vs document", "acceptable": [{"file": "providers/embedding/voyage.ts", "snippet": "input_type"}]},
+  {"id": "q11", "query": "active.json manifest", "acceptable": [{"file": "index-manager.ts", "snippet": "active.json"}]},
+  {"id": "q12", "query": "candidateTopK default", "acceptable": [{"file": "config.ts", "snippet": "candidateTopK"}]},
+  {"id": "q13", "query": "NoneReranker behavior", "acceptable": [{"file": "providers/reranker/none.ts", "snippet": "NoneReranker"}]},
+  {"id": "q14", "query": "Context builder citation ids", "acceptable": [{"file": "context.ts", "snippet": "citationIds"}]},
+  {"id": "q15", "query": "PDF physical page numbers", "acceptable": [{"file": "parsing.ts", "snippet": "pageStart"}]},
+  {"id": "q16", "query": "token-aware chunker overlap", "acceptable": [{"file": "chunking.ts", "snippet": "overlapTokens"}]},
+  {"id": "q17", "query": "VOYAGE_API_KEY environment", "acceptable": [{"file": "config.ts", "snippet": "VOYAGE_API_KEY"}]},
+  {"id": "q18", "query": "rebuild --force keeps old index on failure", "acceptable": [{"file": "indexing.ts", "snippet": "rebuildWithSwitch"}]},
+  {"id": "q19", "query": "abbreviation RAG", "acceptable": [{"file": "README.md", "snippet": "RAG"}]},
+  {"id": "q20", "query": "What is the capital of Atlantis in this repository?", "acceptable": [], "unanswerable": true}
+]

@@ -20,6 +20,9 @@
     "repository.ts",
     "fingerprint.ts",
     "index-manager.ts",
+    "retrieval.ts",
+    "context.ts",
+    "parsing.ts",
     "providers/**/*.ts",
     "scripts/**/*.ts",
     "types/**/*.d.ts",
@@ -33,7 +36,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "smoke:voyage-embed": "node --experimental-strip-types scripts/voyage-embed-smoke.ts"
+    "smoke:voyage-embed": "node --experimental-strip-types scripts/voyage-embed-smoke.ts",
+    "smoke:voyage-rerank": "node --experimental-strip-types scripts/voyage-rerank-smoke.ts",
+    "eval:retrieval": "node --experimental-strip-types scripts/eval-retrieval.ts"
   },
   "keywords": [
     "pi-package",

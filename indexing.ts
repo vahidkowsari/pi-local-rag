@@ -2,7 +2,8 @@ import { basename } from "node:path";
 import type Database from "better-sqlite3";
 import { getDbConn, closeDbConn, openDbAt, type IndexStats } from "./db.ts";
 import { VECTOR_DIM } from "./constants.ts";
-import { chunkText, extractText, sha256 } from "./chunking.ts";
+import { chunkBlocks, sha256, type TextChunk } from "./chunking.ts";
+import { extractBlocks } from "./parsing.ts";
 import * as repo from "./repository.ts";
 import { loadConfig } from "./config.ts";
 import { createEmbeddingProvider, embeddingProviderForIndex } from "./providers/embedding/factory.ts";
@@ -12,7 +13,7 @@ import {
 } from "./index-manager.ts";
 import { getRagDir } from "./store.ts";
 import {
-  CHUNK_MAX_LINES, embeddingFingerprintFromConfig, processingFingerprintFromConfig, serializeFingerprint,
+  embeddingFingerprintFromConfig, processingFingerprintFromConfig, serializeFingerprint,
 } from "./fingerprint.ts";
 
 export interface ProgressCallbacks {
@@ -44,7 +45,7 @@ interface FileWork {
   fp: string;
   hash: string;
   size: number;
-  rawChunks: { content: string; lineStart: number; lineEnd: number; hash: string }[];
+  rawChunks: { content: string; lineStart: number; lineEnd: number; hash: string; pageStart?: number | null; pageEnd?: number | null; section?: string | null; chunkIndex?: number }[];
   _vectors?: number[][];
 }
 
@@ -83,10 +84,14 @@ function replaceFileIndex(database: Database.Database, fw: FileWork, indexedAt: 
     for (let j = 0; j < fw.rawChunks.length; j++) {
       const c = fw.rawChunks[j];
       const chunkResult = repo.insertChunk(database, {
-        id: `${sha256(fw.fp)}-${c.lineStart}`,
+        id: `${sha256(fw.fp)}-${c.chunkIndex ?? j}`,
         filePath: fw.fp, content: c.content,
         lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
         indexedAt, tokens: Math.ceil(c.content.length / 4),
+        pageStart: c.pageStart ?? null,
+        pageEnd: c.pageEnd ?? null,
+        section: c.section ?? null,
+        chunkIndex: c.chunkIndex ?? j,
       });
       repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors![j]);
       n++;
@@ -179,7 +184,7 @@ async function indexFilesUnlocked(
     const CONCURRENCY = 32;
     const YIELD_INTERVAL = 64;
 
-    interface ReadResult { fp: string; hash: string; size: number; raw: { content: string; lineStart: number; lineEnd: number }[] }
+    interface ReadResult { fp: string; hash: string; size: number; raw: TextChunk[] }
 
     const readQueue: ReadResult[] = [];
     let readQueueDone = false;
@@ -198,9 +203,9 @@ async function indexFilesUnlocked(
           const i = pathsIdx++;
           if (i >= paths.length) { producersDone++; if (producersDone >= workerCount) { readQueueDone = true; notifyRead(); } return; }
           try {
-            const { text, hash, size } = await extractText(paths[i]);
-            const raw = chunkText(text, CHUNK_MAX_LINES);
-            readQueue.push({ fp: paths[i], hash, size, raw });
+            const parsed = await extractBlocks(paths[i]);
+            const raw = chunkBlocks(parsed.blocks);
+            readQueue.push({ fp: paths[i], hash: parsed.hash, size: parsed.size, raw });
             notifyRead();
           } catch {
             readErrorCount++;
@@ -231,7 +236,11 @@ async function indexFilesUnlocked(
         // Do not delete the live rows here. Old chunks/vectors stay searchable
         // until a validated replacement commits in replaceFileIndex.
 
-        const rawChunks = r.raw.map(c => ({ ...c, hash: sha256(c.content) }));
+        const rawChunks = r.raw.map((c, idx) => ({
+          ...c,
+          hash: sha256(c.content),
+          chunkIndex: c.chunkIndex ?? idx,
+        }));
         stderrProgress(`[${processedCount}/${total}] chunked ${name} (${rawChunks.length} chunks)`);
         progress?.onFile?.(processedCount, total, name, skipped);
 

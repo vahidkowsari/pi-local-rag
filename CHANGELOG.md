@@ -7,6 +7,8 @@
 - **A3: safe reindex**: old chunks/vectors stay until embeddings validate and a per-file transaction replaces them. Failed embeds, bad dimensions, and force-rebuild errors keep the previous searchable index.
 - **B1–B3: embedding providers**: `LocalEmbeddingProvider` wraps MiniLM; config grows nested `embedding`/`reranker`/`http` with `PI_RAG_*` env overlays; `VoyageEmbeddingProvider` talks to `POST /v1/embeddings` with `input_type` query/document. Default remains local. Cloud is not wired into the production index yet.
 - **C1–C2: fingerprint + dynamic dimensions**: each index records embedding and processing fingerprints. Model/dimension changes rebuild into `indexes/<id>/rag.db` and publish `active.json` only after a successful build. Queries embed with the active index's provider.
+- **D1–D3: retrieval + rerank + context**: `/rag search`, `rag_query`, and auto-inject share `retrieve()`. Default reranker is none. Voyage `rerank-2.5-lite` is optional; failures keep hybrid order. Context injection uses an estimated token budget that includes wrappers.
+- **E1–E4: pages, token chunks, eval**: PDF extraction records 1-based physical pages; markdown does not invent pages. Chunker is token-aware with MiniLM-safe defaults. `eval/questions.json` is a 20-question set; `npm run eval:retrieval` does not fabricate scores.
 
 ## 0.4.1
 

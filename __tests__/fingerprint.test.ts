@@ -103,7 +103,7 @@ describe("index compatibility and staging switch", () => {
     });
     stampFingerprints(db, defaultConfig());
     repo.setMetadata(db, repo.MetadataKey.ProcessingFingerprint, serializeFingerprint({
-      parser: "extract-v1", chunker: "other-chunker", maxLines: 50,
+      parser: "blocks-v1", chunker: "other-chunker", maxLines: 50,
     }));
     const r = checkIndexCompatibility(db, defaultConfig());
     expect(r.ok).toBe(false);

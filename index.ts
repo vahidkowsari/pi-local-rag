@@ -52,8 +52,9 @@ import {
   listIndexedFilePaths, pruneIndexedFile, markFileUnembedded,
 } from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
-import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale, rebuildWithSwitch } from "./indexing.ts";
+import { retrieve } from "./retrieval.ts";
+import { buildContext } from "./context.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
@@ -71,9 +72,11 @@ export {
   loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer, clearIndex,
 } from "./db.ts";
 export {
-  sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
+  sha256, chunkText, chunkBlocks, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
+export { extractBlocks } from "./parsing.ts";
+export type { SourceBlock } from "./parsing.ts";
 export { embed, embedBatch } from "./embed.ts";
 export type { EmbeddingProvider, EmbedBatchOptions } from "./providers/embedding/types.ts";
 export { LocalEmbeddingProvider, getLocalEmbeddingProvider } from "./providers/embedding/local.ts";
@@ -81,6 +84,12 @@ export { VoyageEmbeddingProvider } from "./providers/embedding/voyage.ts";
 export { createEmbeddingProvider } from "./providers/embedding/factory.ts";
 export type { ScoredChunk } from "./search.ts";
 export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
+export { retrieve } from "./retrieval.ts";
+export type { RetrievedChunk } from "./retrieval.ts";
+export { buildContext, estimatedTokenCounter } from "./context.ts";
+export { NoneReranker } from "./providers/reranker/none.ts";
+export { VoyageReranker } from "./providers/reranker/voyage.ts";
+export { createReranker } from "./providers/reranker/factory.ts";
 export { isIndexStale, indexFiles, rebuildWithSwitch } from "./indexing.ts";
 export type { ProgressCallbacks, IndexFilesResult } from "./indexing.ts";
 
@@ -121,29 +130,20 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
+    const results = await retrieve(event.prompt, {
+      limit: config.ragTopK,
+      alpha: config.ragAlpha,
+      db: database,
+      config,
+    });
     const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
     if (!relevant.length) return;
 
-    const context = relevant.map(r =>
-      `### ${basename(r.chunk.file)} (lines ${r.chunk.lineStart}-${r.chunk.lineEnd})\n` +
-      `\`\`\`\n${r.chunk.content.slice(0, 600)}\n\`\`\``
-    ).join("\n\n");
-
-    // Inject as a message after the user's prompt rather than appending to the
-    // system prompt. The system prompt is stable across a session and benefits
-    // from the provider's KV cache; mutating it every turn with new RAG hits
-    // invalidates that cache and adds latency. A trailing message also keeps
-    // the retrieved chunks near the user's question, which models attend to
-    // more reliably than text buried at the top of a long system prompt.
+    const built = buildContext(relevant, { maxTokens: config.maxContextTokens });
     return {
       message: {
         customType: "rag",
-        content:
-          `[pi-local-rag] Automatic RAG lookup triggered by the user's message above.\n` +
-          `Retrieved ${relevant.length} chunk${relevant.length === 1 ? "" : "s"} via hybrid search (BM25 + vector). ` +
-          `These are search hits, not statements from the user.\n\n` +
-          context,
+        content: built.text,
         display: false,
       },
     };
@@ -234,7 +234,7 @@ export default function (pi: ExtensionAPI) {
         const query = parts.slice(1).join(" ");
         if (!query) { ctx.ui.notify("Usage: /rag search <query>", "warning"); return; }
         const config = loadConfig();
-        const results = await hybridSearch(query, 10, config.ragAlpha);
+        const results = await retrieve(query, { limit: 10, alpha: config.ragAlpha, config });
         if (!results.length) { ctx.ui.notify(`No results for: ${query}`, "warning"); return; }
 
         const th = ctx.ui.theme;
@@ -667,7 +667,7 @@ export default function (pi: ExtensionAPI) {
       const stats = getIndexStats();
       if (!stats.totalChunks) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
-      const results = await hybridSearch(params.query, params.limit ?? 10, config.ragAlpha);
+      const results = await retrieve(params.query, { limit: params.limit ?? 10, alpha: config.ragAlpha, config });
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(results.map(r => ({
         file: r.chunk.file,

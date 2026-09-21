@@ -149,6 +149,9 @@ export async function hybridSearch(
         id: c.id, file: c.file_path, content: c.chunk_content,
         lineStart: c.line_start, lineEnd: c.line_end,
         hash: c.chunk_hash, indexed: c.indexed_at, tokens: c.tokens,
+        pageStart: (c as { page_start?: number | null }).page_start ?? null,
+        pageEnd: (c as { page_end?: number | null }).page_end ?? null,
+        section: (c as { section?: string | null }).section ?? null,
       },
       bm25: bm25Final, vector: vecNorm, hybrid,
     });

@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import ignore from "ignore";
 import { BINARY_DOC_EXTS, TEXT_MAX_BYTES, BINARY_DOC_MAX_BYTES, SKIP_DIRS } from "./constants.ts";
 import { loadConfig, resolveExtensions, type RagConfig } from "./config.ts";
+import type { SourceBlock } from "./parsing.ts";
 
 const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
 
@@ -15,7 +16,17 @@ export function sha256(data: string): string {
   return createHash("sha256").update(data).digest("hex").slice(0, 12);
 }
 
-export function chunkText(text: string, maxLines = 50): { content: string; lineStart: number; lineEnd: number }[] {
+export interface TextChunk {
+  content: string;
+  lineStart: number;
+  lineEnd: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
+  chunkIndex?: number;
+}
+
+export function chunkText(text: string, maxLines = 50): TextChunk[] {
   const lines = text.split("\n");
   const chunks: { content: string; lineStart: number; lineEnd: number }[] = [];
   let i = 0;
@@ -31,6 +42,88 @@ export function chunkText(text: string, maxLines = 50): { content: string; lineS
     i = end;
   }
   return chunks;
+}
+
+const DEFAULT_TARGET_TOKENS = 180; // MiniLM context is 256; leave headroom
+const DEFAULT_MAX_TOKENS = 240;
+const DEFAULT_OVERLAP_TOKENS = 30;
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/**
+ * Token-aware chunker over structured blocks. PDF page range is the union of
+ * the source blocks that contributed text. IDs are assigned by callers using
+ * document + chunkIndex.
+ */
+export function chunkBlocks(
+  blocks: SourceBlock[],
+  opts: { targetTokens?: number; maxTokens?: number; overlapTokens?: number } = {},
+): TextChunk[] {
+  const target = opts.targetTokens ?? DEFAULT_TARGET_TOKENS;
+  const max = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const overlap = opts.overlapTokens ?? DEFAULT_OVERLAP_TOKENS;
+  const chunks: TextChunk[] = [];
+  let buf = "";
+  let lineStart = 1;
+  let linePos = 1;
+  let pageStart: number | null = null;
+  let pageEnd: number | null = null;
+  let section: string | null = null;
+
+  const flush = (force = false) => {
+    if (!buf.trim()) return;
+    if (!force && estimateTokens(buf) < target) return;
+    chunks.push({
+      content: buf.trimEnd(),
+      lineStart,
+      lineEnd: linePos,
+      pageStart,
+      pageEnd,
+      section,
+      chunkIndex: chunks.length,
+    });
+    if (overlap > 0 && buf.length > 0) {
+      const keep = buf.slice(-overlap * 4);
+      buf = keep;
+      lineStart = Math.max(1, linePos - keep.split("\n").length + 1);
+    } else {
+      buf = "";
+      lineStart = linePos + 1;
+      pageStart = null;
+      pageEnd = null;
+    }
+  };
+
+  for (const block of blocks) {
+    if (!block.text.trim()) continue;
+    if (buf && block.pageStart != null && pageEnd != null && block.pageStart > pageEnd) {
+      flush(true);
+      buf = "";
+      pageStart = null;
+      pageEnd = null;
+    }
+    const paras = block.text.split(/\n{2,}/);
+    for (const para of paras) {
+      const piece = para.trim();
+      if (!piece) continue;
+      const pieceLines = piece.split("\n").length;
+      if (buf && estimateTokens(buf + "\n\n" + piece) > max) flush(true);
+      if (!buf) {
+        lineStart = linePos;
+        pageStart = block.pageStart;
+        section = block.section;
+      }
+      buf = buf ? buf + "\n\n" + piece : piece;
+      if (block.pageStart != null) pageStart = pageStart ?? block.pageStart;
+      if (block.pageEnd != null) pageEnd = block.pageEnd;
+      linePos += pieceLines + 1;
+      if (estimateTokens(buf) >= target) flush(true);
+    }
+  }
+  flush(true);
+  return chunks.map((c, i) => ({ ...c, chunkIndex: i }));
 }
 
 export function collectFiles(

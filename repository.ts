@@ -69,6 +69,12 @@ export function initSchema(db: Database.Database, dimensions: number = VECTOR_DI
     -- without this index each delete full-scans the chunks table.
     CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
   `);
+  const cols = db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+  const names = new Set(cols.map(c => c.name));
+  if (!names.has("page_start")) db.exec("ALTER TABLE chunks ADD COLUMN page_start INTEGER");
+  if (!names.has("page_end")) db.exec("ALTER TABLE chunks ADD COLUMN page_end INTEGER");
+  if (!names.has("section")) db.exec("ALTER TABLE chunks ADD COLUMN section TEXT");
+  if (!names.has("chunk_index")) db.exec("ALTER TABLE chunks ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 0");
   if (!getMetadata(db, MetadataKey.EmbeddingDimensions)) {
     setMetadata(db, MetadataKey.EmbeddingDimensions, String(dim));
   }
@@ -86,6 +92,10 @@ export interface ChunkRow {
   chunk_hash: string;
   indexed_at: string;
   tokens: number;
+  page_start?: number | null;
+  page_end?: number | null;
+  section?: string | null;
+  chunk_index?: number;
 }
 
 export interface NewChunk {
@@ -97,6 +107,10 @@ export interface NewChunk {
   hash: string;
   indexedAt: string;
   tokens: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
+  chunkIndex?: number;
 }
 
 export function hasAnyChunks(db: Database.Database): boolean {
@@ -105,9 +119,12 @@ export function hasAnyChunks(db: Database.Database): boolean {
 
 export function insertChunk(db: Database.Database, c: NewChunk) {
   return db.prepare(`
-    INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(c.id, c.filePath, c.content, c.lineStart, c.lineEnd, c.hash, c.indexedAt, c.tokens);
+    INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens, page_start, page_end, section, chunk_index)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    c.id, c.filePath, c.content, c.lineStart, c.lineEnd, c.hash, c.indexedAt, c.tokens,
+    c.pageStart ?? null, c.pageEnd ?? null, c.section ?? null, c.chunkIndex ?? 0,
+  );
 }
 
 export function deleteChunksForFile(db: Database.Database, filePath: string) {
@@ -119,7 +136,7 @@ export function getChunksByRowids(db: Database.Database, rowids: number[]): Chun
   const placeholders = rowids.map(() => "?").join(",");
   return db.prepare(`
     SELECT rowid, id, file_path, chunk_content, line_start, line_end,
-            chunk_hash, indexed_at, tokens
+            chunk_hash, indexed_at, tokens, page_start, page_end, section, chunk_index
     FROM chunks
     WHERE rowid IN (${placeholders})
   `).all(...rowids) as ChunkRow[];

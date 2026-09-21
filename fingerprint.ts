@@ -4,8 +4,8 @@ import type { EmbeddingConfig, RagConfig } from "./config.ts";
 
 /** Vector representation + normalization contract. Bump when distance assumptions change. */
 export const VECTOR_CONTRACT_VERSION = "l2-unit-v1";
-export const PARSER_VERSION = "extract-v1";
-export const CHUNKER_VERSION = "lines-v1";
+export const PARSER_VERSION = "blocks-v1";
+export const CHUNKER_VERSION = "token-v1";
 export const CHUNK_MAX_LINES = 50;
 
 export interface EmbeddingFingerprint {

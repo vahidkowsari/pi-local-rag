@@ -149,19 +149,23 @@ describe("indexFiles replacement safety", () => {
     const fp = join(proj, "batch.ts");
     writeFileSync(fp, "export const batchMarkerOriginal = 1;\n");
     await mod.indexFiles([fp]);
-    // chunkText windows 50 lines; 300 windows => well over the 256-chunk embed group.
-    const lines = Array.from({ length: 50 * 300 }, (_, i) => `export const batchLine${i} = ${i}; batchMarkerNew`);
-    writeFileSync(fp, lines.join("\n") + "\n");
+    const files = [fp];
+    writeFileSync(fp, "export const batchMarkerNew = 2;\n");
+    for (let i = 0; i < 300; i++) {
+      const extra = join(proj, `batch-extra-${i}.ts`);
+      writeFileSync(extra, `export const batchExtra${i} = ${"word ".repeat(20)};\n`);
+      files.push(extra);
+    }
     let calls = 0;
     embedDocuments.mockImplementation(async (texts: string[]) => {
       calls++;
       if (calls >= 2) throw new Error("second batch failed");
       return texts.map(() => unitVec(1));
     });
-    const r = await mod.indexFiles([fp]);
+    const r = await mod.indexFiles(files);
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(r.indexed).toBe(0);
-    expect(r.failed).toBe(1);
+    expect(r.failed).toBeGreaterThan(0);
     expect(chunkContents(fp).join("\n")).toContain("batchMarkerOriginal");
     expect(chunkContents(fp).join("\n")).not.toContain("batchMarkerNew");
   });
