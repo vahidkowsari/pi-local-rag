@@ -30,6 +30,21 @@ export function normalize(scores: number[]): number[] {
   return scores.map(s => (s - min) / range);
 }
 
+/**
+ * Map FTS5 `bm25()` raw scores onto [0, 1] internal relevance.
+ * SQLite FTS5 BM25 is lower (more negative) for better matches, so this
+ * inverts the range. Equal scores (including a single candidate) map to 1
+ * so a lone hit is not filtered out as hybrid=0.
+ */
+export function bm25ToRelevance(rawScores: number[]): number[] {
+  if (rawScores.length === 0) return [];
+  const max = Math.max(...rawScores);
+  const min = Math.min(...rawScores);
+  const range = max - min;
+  if (range === 0) return rawScores.map(() => 1);
+  return rawScores.map(s => (max - s) / range);
+}
+
 function l2ToCosine(l2Dist: number): number {
   return 1 - (l2Dist * l2Dist) / 2;
 }
@@ -74,20 +89,12 @@ export async function hybridSearch(
   const distances = vecResults.map(r => r.distance);
   const hasVectors = distances.length > 0;
 
-  // Normalize BM25
+  // Normalize BM25: FTS5 bm25() is lower-is-better; invert onto [0, 1].
   const bm25NormMap = new Map<number, number>();
   if (hasBm25) {
-    const bm25Max = Math.max(...bm25Scores);
-    const bm25Min = Math.min(...bm25Scores);
-    const bm25Range = bm25Max - bm25Min;
-    if (bm25Range === 0) {
-      for (const r of ftsResults) {
-        bm25NormMap.set(r.rowid, 1);
-      }
-    } else {
-      for (const r of ftsResults) {
-        bm25NormMap.set(r.rowid, (r.bm25_score - bm25Min) / bm25Range);
-      }
+    const relevance = bm25ToRelevance(bm25Scores);
+    for (let i = 0; i < ftsResults.length; i++) {
+      bm25NormMap.set(ftsResults[i].rowid, relevance[i]);
     }
   }
 

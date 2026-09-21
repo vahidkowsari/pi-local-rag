@@ -42,6 +42,7 @@ import {
   chunkText,
   cosineSimilarity,
   normalize,
+  bm25ToRelevance,
   DEFAULT_TEXT_EXTS,
   normalizeExt,
   resolveExtensions,
@@ -212,6 +213,22 @@ describe("normalize", () => {
   });
   it("single value returns [0]", () => {
     expect(normalize([7])).toEqual([0]);
+  });
+});
+
+describe("bm25ToRelevance", () => {
+  it("inverts FTS5 lower-is-better scores so the most negative maps to 1", () => {
+    const out = bm25ToRelevance([-12, -3, -7.5]);
+    expect(out[0]).toBe(1);
+    expect(out[1]).toBe(0);
+    expect(out[2]).toBeCloseTo(0.5);
+  });
+  it("equal scores (including a single candidate) map to 1, not 0", () => {
+    expect(bm25ToRelevance([-4, -4, -4])).toEqual([1, 1, 1]);
+    expect(bm25ToRelevance([-9])).toEqual([1]);
+  });
+  it("empty input returns []", () => {
+    expect(bm25ToRelevance([])).toEqual([]);
   });
 });
 
@@ -828,6 +845,36 @@ describe("hybridSearch (BM25 via FTS5, no vectors)", () => {
     db.close();
     expect(results[0]?.chunk.file).toContain("auth");
   });
+
+  it("frozen BM25 ranking: strong keyword hit ranks first and is not filtered to 0", async () => {
+    const db = createTestDb([
+      {
+        file: "/papers/strong.md",
+        content: "quantum entanglement quantum entanglement quantum entanglement is the core protocol",
+      },
+      {
+        file: "/papers/medium.md",
+        content: "quantum entanglement protocol description for researchers studying particle pairs in the lab",
+      },
+      {
+        file: "/papers/weak.md",
+        content: "this handbook briefly mentions quantum entanglement among many other topics like cooking baking sewing and travel notes from last winter",
+      },
+      {
+        file: "/papers/none.md",
+        content: "banana bread recipe with walnuts and honey glaze",
+      },
+    ]);
+    const results = await hybridSearch("quantum entanglement", 10, 1.0, db);
+    db.close();
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    expect(results[0].chunk.file).toBe("/papers/strong.md");
+    expect(results[0].hybrid).toBeGreaterThan(0);
+    expect(results[0].bm25).toBeGreaterThan(results[1].bm25);
+    expect(results[0].hybrid).toBe(results[0].bm25);
+    expect(results.map(r => r.chunk.file)).toContain("/papers/medium.md");
+    expect(results.some(r => r.chunk.file === "/papers/none.md")).toBe(false);
+  });
 });
 
 describe("hybridSearch with vectors", () => {
@@ -869,6 +916,32 @@ describe("hybridSearch with vectors", () => {
     if (results.length > 0) {
       expect(results[0].hybrid).toBe(results[0].bm25);
     }
+  });
+
+  it("frozen hybrid ranking: strong keyword hit still ranks first when vectors are present", async () => {
+    const db = createTestDb([
+      {
+        file: "/papers/strong.md",
+        content: "quantum entanglement quantum entanglement quantum entanglement is the core protocol",
+        vector: vec(0),
+      },
+      {
+        file: "/papers/medium.md",
+        content: "quantum entanglement protocol description for researchers studying particle pairs in the lab",
+        vector: vec(0),
+      },
+      {
+        file: "/papers/weak.md",
+        content: "this handbook briefly mentions quantum entanglement among many other topics like cooking baking sewing and travel notes from last winter",
+        vector: vec(0),
+      },
+    ]);
+    const results = await hybridSearch("quantum entanglement", 10, 0.5, db);
+    db.close();
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    expect(results[0].chunk.file).toBe("/papers/strong.md");
+    expect(results[0].hybrid).toBeGreaterThan(results[1].hybrid);
+    expect(results[0].hybrid).toBeGreaterThan(0);
   });
 });
 

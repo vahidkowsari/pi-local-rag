@@ -72,7 +72,7 @@ export {
 } from "./chunking.ts";
 export { embed, embedBatch } from "./embed.ts";
 export type { ScoredChunk } from "./search.ts";
-export { cosineSimilarity, normalize, hybridSearch } from "./search.ts";
+export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
 export { isIndexStale, indexFiles } from "./indexing.ts";
 export type { ProgressCallbacks } from "./indexing.ts";
 

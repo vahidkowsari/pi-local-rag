@@ -15,7 +15,7 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 ## A1 — Fix module interfaces and package contents
 
 - Status: **done**
-- Commit: recorded after `git commit` on this branch
+- Commit: `a4d060d`
 - Changes:
   - Unified DB exports: `getDbConn` / `closeDbConn` / `getFreshDbConn`; `openDb`/`getDb` aliases; `float32ToBuffer` re-exported.
   - Singleton is not closed by command/tool/hook handlers. Accidental `db.close()` on the singleton is detected and the next `getDbConn()` reopens.
@@ -34,7 +34,15 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 
 ## A2 — BM25 direction
 
-- Status: **not started**
+- Status: **done**
+- Commit: this commit on `feat/cloud-research-rag`
+- Changes:
+  - `bm25ToRelevance()` inverts FTS5 `bm25()` (lower/more-negative = better) onto [0, 1].
+  - Equal scores and a single candidate map to 1 so a lone hit is not filtered as `hybrid=0`.
+  - Frozen fixtures: strong vs medium vs weak "quantum entanglement" ranking on pure BM25 (`alpha=1`) and hybrid (`alpha=0.5`).
+- Tests: `SKIP_EMBEDDING_TESTS=1 npm test` → 119 passed, 4 skipped. `npm run typecheck` → pass.
+- Unverified: real ONNX hybrid path (skipped).
+- Next: A3 keep old index on failure.
 
 ## A3 — Keep old index on failure
 
