@@ -44,6 +44,12 @@ export class RagDatabase {
   private constructor() {}
 
   static get instance(): Database.Database {
+    // If a caller closed the singleton Database object directly (db.close())
+    // without going through closeDbConn(), `_instance` would otherwise keep
+    // handing out a dead connection. Detect that and reopen.
+    if (RagDatabase._instance && !RagDatabase._instance.open) {
+      RagDatabase._instance = null;
+    }
     return RagDatabase._instance ??= RagDatabase.open();
   }
 
@@ -95,6 +101,13 @@ export const closeDbConn = () => { RagDatabase.close(); };
  * the caller is responsible for closing it. Use `getDbConn()` for normal access.
  */
 export const getFreshDbConn = (dir?: string) => RagDatabase.getFreshDbConn(dir);
+
+/** @deprecated Use getDbConn(). Alias for callers that still import openDb. */
+export const openDb = getDbConn;
+/** @deprecated Use getDbConn(). Alias for callers that still import getDb. */
+export const getDb = getDbConn;
+
+export { float32ToBuffer } from "./repository.ts";
 
 export function initSchema(db: Database.Database) {
   repo.initSchema(db);
@@ -179,4 +192,24 @@ export function getEmbeddedCount(): number {
 
 export function getIndexedFiles(): repo.FileRow[] {
   return repo.listFiles(getDbConn());
+}
+
+export function listIndexedFilePaths(): string[] {
+  return repo.listFilePaths(getDbConn());
+}
+
+export function pruneIndexedFile(filePath: string): void {
+  repo.deleteIndexedFile(getDbConn(), filePath);
+}
+
+export function markFileUnembedded(filePath: string): void {
+  repo.setFileEmbedded(getDbConn(), filePath, false);
+}
+
+/** Wipe chunks, vectors, files, and reset build metadata. Does not close the connection. */
+export function clearIndex(db?: Database.Database): void {
+  const dbConn = db ?? getDbConn();
+  repo.clearAllVectors(dbConn);
+  repo.setMetadata(dbConn, repo.MetadataKey.LastBuild, "");
+  repo.setMetadata(dbConn, repo.MetadataKey.EmbeddingModel, "");
 }

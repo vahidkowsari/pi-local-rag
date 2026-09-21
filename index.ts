@@ -29,7 +29,8 @@
  *   constants.ts     — shared constants, file ext sets, size limits
  *   store.ts         — RAG_DIR / LEGACY_DIR / file paths / ensureDir + legacy migration
  *   config.ts        — RagConfig type, loadConfig / saveConfig, ext helpers
- *   index-store.ts   — Chunk / IndexMeta types, loadIndex / saveIndex (JSON)
+ *   db.ts            — RagDatabase singleton, getDbConn / getFreshDbConn, loadIndex
+ *   repository.ts    — SQL statements and schema
  *   chunking.ts      — sha256, chunkText, collectFiles, extractText (txt/pdf/docx/html)
  *   embed.ts         — getEmbedder, embed, embedBatch (ONNX via @xenova/transformers)
  *   search.ts        — cosineSimilarity, normalize, hybridSearch
@@ -46,7 +47,10 @@ import ignore from "ignore";
 import { RST, B, D, GREEN, CYAN } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
 import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
-import { openDb, loadIndex, saveIndex, getIndexStats } from "./db.ts";
+import {
+  getDbConn, loadIndex, getIndexStats, clearIndex,
+  listIndexedFilePaths, pruneIndexedFile, markFileUnembedded,
+} from "./db.ts";
 import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
 import { hybridSearch } from "./search.ts";
 import { indexFiles, isIndexStale } from "./indexing.ts";
@@ -58,7 +62,10 @@ export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
 export type { RagConfig } from "./config.ts";
 export { loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
-export { openDb, getDb, loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer } from "./db.ts";
+export {
+  getDbConn, closeDbConn, getFreshDbConn, openDb, getDb,
+  loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer, clearIndex,
+} from "./db.ts";
 export {
   sha256, chunkText, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
@@ -83,31 +90,32 @@ export default function (pi: ExtensionAPI) {
     const config = loadConfig();
     if (!config.ragEnabled) return;
 
-    const database = openDb();
-    try {
-      const stats = getIndexStats(database);
-      if (stats.totalChunks === 0) return;
+    // Singleton connection: do not close it here. closeDbConn() is owned by
+    // the process/test lifecycle; closing the handle would poison later
+    // getDbConn() callers until reopen.
+    const database = getDbConn();
+    const stats = getIndexStats(database);
+    if (stats.totalChunks === 0) return;
 
-      const indexMeta = { chunks: [], files: {}, lastBuild: stats.lastBuild, embeddingModel: stats.embeddingModel };
-      const now = Date.now();
-      if (isIndexStale(indexMeta) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
-        lastStaleCheckMs = now;
-        // Re-walk tracked paths so new files (and files of newly-supported
-        // extensions, e.g. PDF/DOCX added in a later version) are picked up.
-        // For pre-trackedPaths indexes, fall back to refreshing only known files.
-        const files = config.trackedPaths.length
-          ? collectFromTracked(config)
-          : Object.keys(loadIndex().files).filter(f => existsSync(f));
-        if (files.length) {
-          process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
-          await indexFiles(files, undefined, database);
-          process.stderr.write(`\r\x1b[2K`);
-        }
+    const now = Date.now();
+    if (isIndexStale(stats) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
+      lastStaleCheckMs = now;
+      // Re-walk tracked paths so new files (and files of newly-supported
+      // extensions, e.g. PDF/DOCX added in a later version) are picked up.
+      // For pre-trackedPaths indexes, fall back to refreshing only known files.
+      const files = config.trackedPaths.length
+        ? collectFromTracked(config)
+        : Object.keys(loadIndex().files).filter(f => existsSync(f));
+      if (files.length) {
+        process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
+        await indexFiles(files, undefined, database);
+        process.stderr.write(`\r\x1b[2K`);
       }
+    }
 
-      const results = await hybridSearch(event.prompt, indexMeta, config.ragTopK, config.ragAlpha, database);
-      const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
-      if (!relevant.length) return;
+    const results = await hybridSearch(event.prompt, config.ragTopK, config.ragAlpha, database);
+    const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
+    if (!relevant.length) return;
 
     const context = relevant.map(r =>
       `### ${basename(r.chunk.file)} (lines ${r.chunk.lineStart}-${r.chunk.lineEnd})\n` +
@@ -120,20 +128,17 @@ export default function (pi: ExtensionAPI) {
     // invalidates that cache and adds latency. A trailing message also keeps
     // the retrieved chunks near the user's question, which models attend to
     // more reliably than text buried at the top of a long system prompt.
-      return {
-        message: {
-          customType: "rag",
-          content:
-            `[pi-local-rag] Automatic RAG lookup triggered by the user's message above.\n` +
-            `Retrieved ${relevant.length} chunk${relevant.length === 1 ? "" : "s"} via hybrid search (BM25 + vector). ` +
-            `These are search hits, not statements from the user.\n\n` +
-            context,
-          display: false,
-        },
-      };
-    } finally {
-      database.close();
-    }
+    return {
+      message: {
+        customType: "rag",
+        content:
+          `[pi-local-rag] Automatic RAG lookup triggered by the user's message above.\n` +
+          `Retrieved ${relevant.length} chunk${relevant.length === 1 ? "" : "s"} via hybrid search (BM25 + vector). ` +
+          `These are search hits, not statements from the user.\n\n` +
+          context,
+        display: false,
+      },
+    };
   });
 
   // ── /rag command ──
@@ -220,15 +225,12 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "search") {
         const query = parts.slice(1).join(" ");
         if (!query) { ctx.ui.notify("Usage: /rag search <query>", "warning"); return; }
-        const index = loadIndex();
         const config = loadConfig();
-        const results = await hybridSearch(query, index, 10, config.ragAlpha);
+        const results = await hybridSearch(query, 10, config.ragAlpha);
         if (!results.length) { ctx.ui.notify(`No results for: ${query}`, "warning"); return; }
 
         const th = ctx.ui.theme;
-        const database = openDb();
-        const hasVectors = getIndexStats(database).embeddedCount > 0;
-        database.close();
+        const hasVectors = getIndexStats().embeddedCount > 0;
         const lines: string[] = [
           th.bold(th.fg("accent", "🔍 ") + `${results.length} results for "${query}"`) +
             "  " + th.fg("dim", hasVectors ? "hybrid BM25+vector" : "BM25 only"),
@@ -263,11 +265,9 @@ export default function (pi: ExtensionAPI) {
         const rebuildArgs = parts.slice(1);
         const force = rebuildArgs.includes("--force");
 
-        const database = openDb();
+        const database = getDbConn();
         const config = loadConfig();
-        try {
-          const indexedRows = database.prepare("SELECT path FROM files").all() as Array<{ path: string }>;
-          const indexedFileSet = new Set(indexedRows.map(f => f.path));
+        const indexedFileSet = new Set(listIndexedFilePaths());
 
           // Walking tracked paths can stall the event loop on large trees
           // (45k+ files). Use the async variant + yield up-front so the user
@@ -291,21 +291,16 @@ export default function (pi: ExtensionAPI) {
 
           // Files in the index but no longer present (deleted, excluded, or untracked).
           const droppedFiles = [...indexedFileSet].filter(f => !targetSet.has(f));
-          for (const f of droppedFiles) {
-            database.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(f);
-            database.prepare("DELETE FROM chunks WHERE file_path = ?").run(f);
-            database.prepare("DELETE FROM files WHERE path = ?").run(f);
-          }
+          for (const f of droppedFiles) pruneIndexedFile(f);
           if (force) {
             // --force: wipe everything and rebuild the FTS index. indexFiles
             // will then insert fresh rows for every targetFile, bypassing the
             // skip-on-equal-hash check.
-            database.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
-            database.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+            // A3 will move this wipe into the replacement transaction so a
+            // failed force-rebuild keeps the previous index.
+            clearIndex(database);
           } else {
-            for (const f of targetFiles) {
-              database.prepare("UPDATE files SET embedded = 0 WHERE path = ?").run(f);
-            }
+            for (const f of targetFiles) markFileUnembedded(f);
           }
 
           const newFiles = targetFiles.filter(f => !indexedFileSet.has(f));
@@ -355,9 +350,6 @@ export default function (pi: ExtensionAPI) {
 
           const secs = (result.durationMs / 1000).toFixed(1);
           ctx.ui.notify(`✅ Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${droppedFiles.length} deleted · ${result.chunks} chunks · ${secs}s`, "info");
-        } finally {
-          database.close();
-        }
         return;
       }
 
@@ -463,7 +455,7 @@ export default function (pi: ExtensionAPI) {
 
       // ── clear ──
       if (cmd === "clear") {
-        saveIndex({ chunks: [], files: {}, lastBuild: "" });
+        clearIndex();
         ctx.ui.notify("Index cleared.", "info");
         return;
       }
@@ -575,9 +567,7 @@ export default function (pi: ExtensionAPI) {
       // ── status (default) ──
       const index = loadIndex();
       const config = loadConfig();
-      const database = openDb();
-      const stats = getIndexStats(database);
-      database.close();
+      const stats = getIndexStats();
       const fileCount = stats.totalFiles;
       const totalTokens = stats.totalTokens;
       const embeddedCount = stats.embeddedCount;
@@ -667,10 +657,10 @@ export default function (pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
     }),
     execute: async (_toolCallId, params) => {
-      const index = loadIndex();
-      if (!index.chunks.length) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
+      const stats = getIndexStats();
+      if (!stats.totalChunks) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
       const config = loadConfig();
-      const results = await hybridSearch(params.query, index, params.limit ?? 10, config.ragAlpha);
+      const results = await hybridSearch(params.query, params.limit ?? 10, config.ragAlpha);
       if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
       const text = JSON.stringify(results.map(r => ({
         file: r.chunk.file,
@@ -690,9 +680,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     execute: async (_toolCallId) => {
       const config = loadConfig();
-      const database = openDb();
-      const stats = getIndexStats(database);
-      database.close();
+      const stats = getIndexStats();
       const embeddedCount = stats.embeddedCount;
       const text = JSON.stringify({
         files: stats.totalFiles,

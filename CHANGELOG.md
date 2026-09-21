@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A1: module interface sync**: `index.ts` now calls `hybridSearch(query, limit, alpha)` and `isIndexStale(IndexStats)`. Public DB access is `getDbConn()` (singleton, closed by `closeDbConn()`) and `getFreshDbConn()` (caller-owned). `openDb`/`getDb` remain aliases of `getDbConn`. Closing the singleton handle no longer permanently poisons later `getDbConn()` calls. `/rag clear` actually wipes SQLite instead of calling the no-op `saveIndex`. `package.json` `files` includes `repository.ts`. TypeScript 5.7.3 is a locked devDependency.
+
 ## 0.4.1
 
 - **Docs refresh**: README rewritten for 0.4.0 feature set — SQLite/FTS5/sqlite-vec storage, PDF/DOCX/HTML extraction, OCR fallback, per-project store, tracked paths + exclude patterns, 24 h auto-refresh, trailing-message auto-injection. Commands table expanded with `/rag find`, `/rag refresh`, `/rag rebuild --force`, `/rag exclude`, `/rag help`. Optional OCR install instructions (`brew install poppler tesseract tesseract-lang` / `apt install poppler-utils tesseract-ocr ...`). New "Testing" section noting `SKIP_EMBEDDING_TESTS` and the tesseract-absent OCR skip.

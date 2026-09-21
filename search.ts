@@ -1,7 +1,6 @@
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import { embed } from "./embed.ts";
-import { getDbConn } from "./db.ts";
-import { Chunk } from "./db.ts";
+import { getDbConn, type Chunk } from "./db.ts";
 import * as repo from "./repository.ts";
 
 export interface ScoredChunk {

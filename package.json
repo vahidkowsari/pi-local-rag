@@ -17,14 +17,15 @@
     "embed.ts",
     "search.ts",
     "indexing.ts",
+    "repository.ts",
     "types/**/*.d.ts",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "npx --yes -p typescript@5.7.3 tsc -p tsconfig.json --noCheck",
-    "typecheck": "npx -p typescript@5.7.3 tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noCheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -88,6 +89,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@vitest/coverage-v8": "^4.1.7",
     "jszip": "^3.10.1",
+    "typescript": "^5.7.3",
     "vitest": "^4.1.7"
   }
 }

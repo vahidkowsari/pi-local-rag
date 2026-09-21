@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import { getDbConn, type IndexStats } from "./db.ts";
 import { EMBEDDING_MODEL } from "./constants.ts";
 import { embedBatch } from "./embed.ts";

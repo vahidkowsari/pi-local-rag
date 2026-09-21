@@ -137,12 +137,8 @@ export function getAllChunks(db: Database.Database): LoadedChunk[] {
 
 // ─── Vectors (chunks_vec) ────────────────────────────────────────────────
 
-/**
- * Internal only — not part of the module's public surface. Vector params
- * come in as `number[]`; every caller converts through this before it
- * touches chunks_vec.
- **/
-function float32ToBuffer(arr: number[]): Buffer {
+/** Convert a JS number[] embedding into the Float32 buffer sqlite-vec expects. */
+export function float32ToBuffer(arr: number[]): Buffer {
   const f = new Float32Array(arr);
   return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
 }
@@ -236,6 +232,13 @@ export function replaceFile(
 
 export function deleteFile(db: Database.Database, path: string) {
   db.prepare("DELETE FROM files WHERE path = ?").run(path);
+}
+
+/** Drop a file's vectors, chunks, and files-row together. */
+export function deleteIndexedFile(db: Database.Database, filePath: string): void {
+  deleteVectorsForFile(db, filePath);
+  deleteChunksForFile(db, filePath);
+  deleteFile(db, filePath);
 }
 
 export function setFileEmbedded(db: Database.Database, path: string, embedded: boolean) {
