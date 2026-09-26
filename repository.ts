@@ -1,0 +1,346 @@
+import type Database from "better-sqlite3";
+import { VECTOR_DIM } from "./constants.ts";
+import { safeVectorDimensions } from "./fingerprint.ts";
+
+/**
+ * Centralizes every raw SQL statement used across db.ts, indexing.ts,
+ * search.ts, and index.ts. Nothing outside this file should contain a
+ * `.prepare` / `.exec` call against the rag database — that keeps the
+ * schema-to-code contract in one place instead of scattered across four
+ * files with subtly duplicated INSERT shapes.
+ *
+ * These are plain functions, not a class with cached prepared statements:
+ * better-sqlite3 already caches statements per-connection internally via
+ * db.prepare, and singleton lifetime (open/close) is still owned by
+ * RagDatabase in db.ts. This module is just where the SQL text lives.
+ */
+
+// ─── Schema ──────────────────────────────────────────────────────────────
+
+export function initSchema(db: Database.Database, dimensions: number = VECTOR_DIM) {
+  const dim = safeVectorDimensions(dimensions);
+  db.exec(`DROP TRIGGER IF EXISTS chunks_ai; DROP TRIGGER IF EXISTS chunks_ad;`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS metadata (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chunks (
+      id          TEXT PRIMARY KEY,
+      file_path   TEXT NOT NULL,
+      chunk_content TEXT NOT NULL,
+      line_start  INTEGER NOT NULL,
+      line_end    INTEGER NOT NULL,
+      chunk_hash  TEXT NOT NULL,
+      indexed_at  TEXT NOT NULL,
+      tokens      INTEGER NOT NULL
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+      chunk_content,
+      file_path,
+      content_rowid=rowid
+    );
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+      INSERT INTO chunks_fts(rowid, chunk_content, file_path)
+      VALUES (new.rowid, new.chunk_content, new.file_path);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+      DELETE FROM chunks_fts WHERE rowid = old.rowid;
+    END;
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+      embedding float[${dim}]
+    );
+
+    CREATE TABLE IF NOT EXISTS files (
+      path         TEXT PRIMARY KEY,
+      hash         TEXT NOT NULL,
+      chunks       INTEGER NOT NULL,
+      indexed      TEXT NOT NULL,
+      size         INTEGER NOT NULL,
+      embedded     INTEGER NOT NULL DEFAULT 0,
+      document_id  TEXT,
+      title        TEXT
+    );
+
+    -- Re-indexing deletes chunks per file (DELETE … WHERE file_path = ?);
+    -- without this index each delete full-scans the chunks table.
+    CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
+  `);
+  const cols = db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+  const names = new Set(cols.map(c => c.name));
+  if (!names.has("page_start")) db.exec("ALTER TABLE chunks ADD COLUMN page_start INTEGER");
+  if (!names.has("page_end")) db.exec("ALTER TABLE chunks ADD COLUMN page_end INTEGER");
+  if (!names.has("section")) db.exec("ALTER TABLE chunks ADD COLUMN section TEXT");
+  if (!names.has("chunk_index")) db.exec("ALTER TABLE chunks ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 0");
+  const fileCols = db.prepare("PRAGMA table_info(files)").all() as Array<{ name: string }>;
+  const fileNames = new Set(fileCols.map(c => c.name));
+  if (!fileNames.has("document_id")) db.exec("ALTER TABLE files ADD COLUMN document_id TEXT");
+  if (!fileNames.has("title")) db.exec("ALTER TABLE files ADD COLUMN title TEXT");
+  if (!getMetadata(db, MetadataKey.EmbeddingDimensions)) {
+    setMetadata(db, MetadataKey.EmbeddingDimensions, String(dim));
+  }
+}
+
+// ─── Chunks ──────────────────────────────────────────────────────────────
+
+export interface ChunkRow {
+  rowid: number;
+  id: string;
+  file_path: string;
+  chunk_content: string;
+  line_start: number;
+  line_end: number;
+  chunk_hash: string;
+  indexed_at: string;
+  tokens: number;
+  page_start?: number | null;
+  page_end?: number | null;
+  section?: string | null;
+  chunk_index?: number;
+}
+
+export interface NewChunk {
+  id: string;
+  filePath: string;
+  content: string;
+  lineStart: number;
+  lineEnd: number;
+  hash: string;
+  indexedAt: string;
+  tokens: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
+  chunkIndex?: number;
+}
+
+export function hasAnyChunks(db: Database.Database): boolean {
+  return !!db.prepare("SELECT 1 FROM chunks LIMIT 1").get();
+}
+
+export function insertChunk(db: Database.Database, c: NewChunk) {
+  return db.prepare(`
+    INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens, page_start, page_end, section, chunk_index)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    c.id, c.filePath, c.content, c.lineStart, c.lineEnd, c.hash, c.indexedAt, c.tokens,
+    c.pageStart ?? null, c.pageEnd ?? null, c.section ?? null, c.chunkIndex ?? 0,
+  );
+}
+
+export function deleteChunksForFile(db: Database.Database, filePath: string) {
+  db.prepare("DELETE FROM chunks WHERE file_path = ?").run(filePath);
+}
+
+export function getChunksByRowids(db: Database.Database, rowids: number[]): ChunkRow[] {
+  if (rowids.length === 0) return [];
+  const placeholders = rowids.map(() => "?").join(",");
+  return db.prepare(`
+    SELECT rowid, id, file_path, chunk_content, line_start, line_end,
+            chunk_hash, indexed_at, tokens, page_start, page_end, section, chunk_index
+    FROM chunks
+    WHERE rowid IN (${placeholders})
+  `).all(...rowids) as ChunkRow[];
+}
+
+export interface LoadedChunk {
+  id: string; file: string; content: string;
+  lineStart: number; lineEnd: number;
+  hash: string; indexed: string; tokens: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
+  chunkIndex?: number;
+}
+
+export function getAllChunks(db: Database.Database): LoadedChunk[] {
+  return db.prepare(`
+    SELECT c.id, c.file_path as file, c.chunk_content as content,
+            c.line_start as lineStart, c.line_end as lineEnd,
+            c.chunk_hash as hash, c.indexed_at as indexed, c.tokens,
+            c.page_start as pageStart, c.page_end as pageEnd,
+            c.section as section, c.chunk_index as chunkIndex
+    FROM chunks c
+  `).all() as LoadedChunk[];
+}
+
+// ─── Vectors (chunks_vec) ────────────────────────────────────────────────
+
+/** Convert a JS number[] embedding into the Float32 buffer sqlite-vec expects. */
+export function float32ToBuffer(arr: number[]): Buffer {
+  const f = new Float32Array(arr);
+  return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
+}
+
+export function insertVector(db: Database.Database, rowid: number, vector: number[]) {
+  db.prepare("INSERT INTO chunks_vec(rowid, embedding) VALUES (CAST(? AS INTEGER), ?)")
+    .run(rowid, float32ToBuffer(vector));
+}
+
+export function deleteVectorsForFile(db: Database.Database, filePath: string) {
+  db.prepare("DELETE FROM chunks_vec WHERE rowid IN (SELECT rowid FROM chunks WHERE file_path = ?)").run(filePath);
+}
+
+export interface VecMatch {
+  rowid: number;
+  distance: number
+}
+
+export function searchVectors(db: Database.Database, queryVec: number[], limit: number): VecMatch[] {
+  return db.prepare(`
+    SELECT rowid, distance
+    FROM chunks_vec
+    WHERE embedding MATCH ?
+    LIMIT ?
+  `).bind(float32ToBuffer(queryVec), limit).all() as VecMatch[];
+}
+
+export function getEmbeddedCount(db: Database.Database): number {
+  const row = db.prepare("SELECT COUNT(*) as embeddedCount FROM chunks_vec").get() as { embeddedCount: number };
+  return row.embeddedCount;
+}
+
+export function clearAllVectors(db: Database.Database) {
+  db.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
+  db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
+}
+
+// ─── Fts (chunks_fts / BM25) ─────────────────────────────────────────────
+
+export interface FtsMatch { rowid: number; bm25_score: number }
+
+export function searchFts(db: Database.Database, ftsQuery: string, limit: number): FtsMatch[] {
+  return db.prepare(`
+    SELECT chunks_fts.rowid, bm25(chunks_fts) as bm25_score
+    FROM chunks_fts
+    WHERE chunks_fts MATCH ?
+    ORDER BY bm25(chunks_fts)
+    LIMIT ?
+  `).all(ftsQuery, limit) as FtsMatch[];
+}
+
+// ─── Files ───────────────────────────────────────────────────────────────
+
+export interface FileRow {
+  path: string;
+  hash: string;
+  chunks: number;
+  indexed: string;
+  size: number;
+  embedded: number;
+  document_id?: string | null;
+  title?: string | null;
+}
+
+export function getFile(db: Database.Database, path: string): { hash?: string; embedded?: number } | undefined {
+  return db.prepare("SELECT hash, embedded FROM files WHERE path = ?").get(path) as
+    { hash?: string; embedded?: number } | undefined;
+}
+
+export function upsertFile(
+  db: Database.Database,
+  path: string, hash: string, chunks: number, indexed: string, size: number, embedded: boolean,
+  meta?: { documentId?: string | null; title?: string | null },
+) {
+  db.prepare(`
+    INSERT INTO files(path, hash, chunks, indexed, size, embedded, document_id, title)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(path) DO UPDATE SET
+      hash=excluded.hash, chunks=excluded.chunks, indexed=excluded.indexed,
+      size=excluded.size, embedded=excluded.embedded,
+      document_id=COALESCE(excluded.document_id, files.document_id),
+      title=COALESCE(excluded.title, files.title)
+  `).run(
+    path, hash, chunks, indexed, size, embedded ? 1 : 0,
+    meta?.documentId ?? null, meta?.title ?? null,
+  );
+}
+
+/** Insert-or-replace variant used by the JSON migration path (no upsert semantics needed there). */
+export function replaceFile(
+  db: Database.Database,
+  path: string, hash: string, chunks: number, indexed: string, size: number, embedded: boolean,
+) {
+  db.prepare(`
+    INSERT OR REPLACE INTO files(path, hash, chunks, indexed, size, embedded)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(path, hash, chunks, indexed, size, embedded ? 1 : 0);
+}
+
+export function deleteFile(db: Database.Database, path: string) {
+  db.prepare("DELETE FROM files WHERE path = ?").run(path);
+}
+
+/** Drop a file's vectors, chunks, and files-row together. */
+export function deleteIndexedFile(db: Database.Database, filePath: string): void {
+  deleteVectorsForFile(db, filePath);
+  deleteChunksForFile(db, filePath);
+  deleteFile(db, filePath);
+}
+
+export function setFileEmbedded(db: Database.Database, path: string, embedded: boolean) {
+  db.prepare("UPDATE files SET embedded = ? WHERE path = ?").run(embedded ? 1 : 0, path);
+}
+
+export function listFiles(db: Database.Database): FileRow[] {
+  return db.prepare("SELECT * FROM files").all() as FileRow[];
+}
+
+export function listFilePaths(db: Database.Database): string[] {
+  return (db.prepare("SELECT path FROM files").all() as Array<{ path: string }>).map(r => r.path);
+}
+
+export function countFiles(db: Database.Database): number {
+  return (db.prepare("SELECT COUNT(*) as totalFiles FROM files").get() as { totalFiles: number }).totalFiles;
+}
+
+// ─── Metadata ────────────────────────────────────────────────────────────
+/**
+ * Canonical metadata key names — the single source of truth so call sites
+ * never spell out "last_build" / "embedding_model" as string literals.
+ **/
+export const MetadataKey = {
+  LastBuild: "last_build",
+  EmbeddingModel: "embedding_model",
+  EmbeddingFingerprint: "embedding_fingerprint",
+  ProcessingFingerprint: "processing_fingerprint",
+  EmbeddingDimensions: "embedding_dimensions",
+} as const;
+
+export type MetadataKey = typeof MetadataKey[keyof typeof MetadataKey];
+
+export function getMetadata(db: Database.Database, key: MetadataKey): string | undefined {
+  return (db.prepare("SELECT value FROM metadata WHERE key = ?").get(key) as { value?: string } | undefined)?.value;
+}
+
+export function setMetadata(db: Database.Database, key: MetadataKey, value: string) {
+  db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)").run(key, value);
+}
+
+export function getChunkStats(db: Database.Database): { totalChunks: number; totalTokens: number } {
+  return db.prepare(`
+    SELECT COUNT(*) as totalChunks, COALESCE(SUM(tokens), 0) as totalTokens
+    FROM chunks
+  `).get() as { totalChunks: number; totalTokens: number };
+}
+
+export function countChunksTotal(db: Database.Database): number {
+  return (db.prepare("SELECT COUNT(*) as c FROM chunks").get() as { c: number }).c;
+}
+
+/** Read stored or observed vector table dimension. */
+export function detectVectorDimensions(db: Database.Database): number | undefined {
+  const meta = getMetadata(db, MetadataKey.EmbeddingDimensions);
+  if (meta) {
+    const n = Number(meta);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  const row = db.prepare("SELECT embedding FROM chunks_vec LIMIT 1").get() as { embedding?: Buffer } | undefined;
+  if (row?.embedding) return row.embedding.byteLength / 4;
+  return undefined;
+}
