@@ -9,3 +9,5 @@ node_modules/
 coverage/
 FORK_WORK.md
 eval/runs/
+docs/
+__tests__
