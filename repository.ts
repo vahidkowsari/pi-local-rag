@@ -57,12 +57,14 @@ export function initSchema(db: Database.Database, dimensions: number = VECTOR_DI
     );
 
     CREATE TABLE IF NOT EXISTS files (
-      path      TEXT PRIMARY KEY,
-      hash      TEXT NOT NULL,
-      chunks    INTEGER NOT NULL,
-      indexed   TEXT NOT NULL,
-      size      INTEGER NOT NULL,
-      embedded  INTEGER NOT NULL DEFAULT 0
+      path         TEXT PRIMARY KEY,
+      hash         TEXT NOT NULL,
+      chunks       INTEGER NOT NULL,
+      indexed      TEXT NOT NULL,
+      size         INTEGER NOT NULL,
+      embedded     INTEGER NOT NULL DEFAULT 0,
+      document_id  TEXT,
+      title        TEXT
     );
 
     -- Re-indexing deletes chunks per file (DELETE … WHERE file_path = ?);
@@ -75,6 +77,10 @@ export function initSchema(db: Database.Database, dimensions: number = VECTOR_DI
   if (!names.has("page_end")) db.exec("ALTER TABLE chunks ADD COLUMN page_end INTEGER");
   if (!names.has("section")) db.exec("ALTER TABLE chunks ADD COLUMN section TEXT");
   if (!names.has("chunk_index")) db.exec("ALTER TABLE chunks ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 0");
+  const fileCols = db.prepare("PRAGMA table_info(files)").all() as Array<{ name: string }>;
+  const fileNames = new Set(fileCols.map(c => c.name));
+  if (!fileNames.has("document_id")) db.exec("ALTER TABLE files ADD COLUMN document_id TEXT");
+  if (!fileNames.has("title")) db.exec("ALTER TABLE files ADD COLUMN title TEXT");
   if (!getMetadata(db, MetadataKey.EmbeddingDimensions)) {
     setMetadata(db, MetadataKey.EmbeddingDimensions, String(dim));
   }
@@ -146,13 +152,19 @@ export interface LoadedChunk {
   id: string; file: string; content: string;
   lineStart: number; lineEnd: number;
   hash: string; indexed: string; tokens: number;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  section?: string | null;
+  chunkIndex?: number;
 }
 
 export function getAllChunks(db: Database.Database): LoadedChunk[] {
   return db.prepare(`
     SELECT c.id, c.file_path as file, c.chunk_content as content,
             c.line_start as lineStart, c.line_end as lineEnd,
-            c.chunk_hash as hash, c.indexed_at as indexed, c.tokens
+            c.chunk_hash as hash, c.indexed_at as indexed, c.tokens,
+            c.page_start as pageStart, c.page_end as pageEnd,
+            c.section as section, c.chunk_index as chunkIndex
     FROM chunks c
   `).all() as LoadedChunk[];
 }
@@ -221,6 +233,8 @@ export interface FileRow {
   indexed: string;
   size: number;
   embedded: number;
+  document_id?: string | null;
+  title?: string | null;
 }
 
 export function getFile(db: Database.Database, path: string): { hash?: string; embedded?: number } | undefined {
@@ -231,14 +245,20 @@ export function getFile(db: Database.Database, path: string): { hash?: string; e
 export function upsertFile(
   db: Database.Database,
   path: string, hash: string, chunks: number, indexed: string, size: number, embedded: boolean,
+  meta?: { documentId?: string | null; title?: string | null },
 ) {
   db.prepare(`
-    INSERT INTO files(path, hash, chunks, indexed, size, embedded)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO files(path, hash, chunks, indexed, size, embedded, document_id, title)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET
       hash=excluded.hash, chunks=excluded.chunks, indexed=excluded.indexed,
-      size=excluded.size, embedded=excluded.embedded
-  `).run(path, hash, chunks, indexed, size, embedded ? 1 : 0);
+      size=excluded.size, embedded=excluded.embedded,
+      document_id=COALESCE(excluded.document_id, files.document_id),
+      title=COALESCE(excluded.title, files.title)
+  `).run(
+    path, hash, chunks, indexed, size, embedded ? 1 : 0,
+    meta?.documentId ?? null, meta?.title ?? null,
+  );
 }
 
 /** Insert-or-replace variant used by the JSON migration path (no upsert semantics needed there). */

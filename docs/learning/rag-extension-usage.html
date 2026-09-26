@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="基于当前工作树的 pi-local-rag Extension 使用教程：隔离试用、命令、云端 Provider、故障恢复与源码链路。">
+  <title>RAG Extension 使用课 · pi-local-rag</title>
+  <style>
+    :root { --paper:#f6f8fb; --white:#fff; --ink:#17263d; --muted:#4f6178; --line:#d8e1ec; --blue:#244eac; --pale:#eaf1ff; --teal:#086f78; --code:#111c2e; --code-ink:#e5edfb; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; scroll-padding-top:1.5rem; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.78 "Avenir Next","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+    a { color:var(--blue); text-underline-offset:3px; }
+    a:hover { color:#143775; }
+    :focus-visible { outline:3px solid #d38b19; outline-offset:3px; border-radius:2px; }
+    .mast { border-bottom:1px solid var(--line); background:var(--white); }
+    .mast-inner { max-width:1280px; margin:auto; padding:13px 24px; display:flex; justify-content:space-between; gap:1rem; align-items:center; }
+    .brand { color:var(--ink); font-weight:750; text-decoration:none; letter-spacing:.01em; }
+    .mast nav { display:flex; flex-wrap:wrap; gap:16px; font-size:.86rem; }
+    .shell { max-width:1280px; margin:auto; padding:32px 24px 96px; display:grid; grid-template-columns:215px minmax(0,820px); justify-content:center; gap:44px; }
+    .toc { position:sticky; top:24px; align-self:start; max-height:calc(100vh - 48px); overflow:auto; }
+    .toc h2 { margin:0 0 12px; color:var(--muted); font-size:.75rem; letter-spacing:.09em; }
+    .toc ol { list-style:none; padding:0; margin:0; }
+    .toc li { margin:2px 0; }
+    .toc a { display:block; padding:5px 10px; border-left:2px solid transparent; color:var(--muted); text-decoration:none; font-size:.85rem; line-height:1.5; }
+    .toc a:hover,.toc a:focus-visible { color:var(--blue); border-left-color:var(--blue); background:var(--pale); }
+    main { min-width:0; }
+    .eyebrow { margin:0 0 8px; color:var(--teal); font-size:.76rem; font-weight:700; letter-spacing:.08em; }
+    h1,h2,h3 { line-height:1.31; letter-spacing:-.018em; }
+    h1 { margin:0 0 17px; font-size:clamp(2rem,4vw,3.2rem); }
+    h2 { margin:62px 0 17px; font-size:1.7rem; }
+    h3 { margin:30px 0 10px; font-size:1.15rem; }
+    p { margin:0 0 17px; }
+    ul,ol { padding-left:1.4em; }
+    li { margin:7px 0; }
+    .intro { padding-bottom:29px; border-bottom:1px solid var(--line); }
+    .lede { color:var(--muted); font-size:1.1rem; }
+    .stamp { color:var(--muted); font-size:.84rem; }
+    .callout { margin:23px 0; padding:17px 20px; border-left:4px solid var(--teal); background:var(--white); }
+    .callout.warn { border-left-color:#a76219; }
+    .flow { padding:18px 22px; margin:20px 0; background:#e9f0fa; border:1px solid #cddcf2; font:600 .91rem/1.8 "SFMono-Regular",Consolas,monospace; overflow-x:auto; white-space:pre; }
+    pre { margin:16px 0 25px; padding:18px 20px; overflow-x:auto; color:var(--code-ink); background:var(--code); border-radius:5px; font:13px/1.7 "SFMono-Regular",Consolas,"Liberation Mono",monospace; tab-size:2; }
+    code { font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace; }
+    p code,li code,td code { padding:2px 4px; color:#173e91; background:#e8eef8; border-radius:3px; font-size:.88em; }
+    .table-wrap { width:100%; overflow-x:auto; margin:18px 0 25px; }
+    table { width:100%; min-width:610px; border-collapse:collapse; background:var(--white); }
+    th,td { padding:11px 13px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#eaf0f8; font-size:.84rem; }
+    td { font-size:.88rem; }
+    .source { color:var(--muted); font-size:.82rem; }
+    .check { border-top:1px solid var(--line); padding-top:21px; }
+    footer { max-width:1280px; margin:auto; padding:24px; border-top:1px solid var(--line); color:var(--muted); font-size:.82rem; }
+    @media(max-width:900px) { .shell { grid-template-columns:1fr; gap:19px; } .toc { position:static; max-height:none; } .toc ol { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 8px; } }
+    @media(max-width:560px) { .mast-inner { align-items:flex-start; flex-direction:column; padding:11px 16px; } .shell { padding:23px 16px 68px; } .toc ol { grid-template-columns:1fr 1fr; } .toc a { padding:5px 6px; font-size:.78rem; } h2 { margin-top:48px; font-size:1.45rem; } pre { padding:14px; font-size:12px; } }
+    @media(prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+  </style>
+</head>
+<body>
+  <header class="mast"><div class="mast-inner"><a class="brand" href="../../README.md">pi-local-rag / 使用课</a><nav aria-label="相关材料"><a href="provider-rag-code-reading.html">Provider 源码阅读课</a><a href="../../README.md">项目 README</a></nav></div></header>
+  <div class="shell">
+    <nav class="toc" aria-label="本页目录"><h2>本页目录</h2><ol>
+      <li><a href="#mental-model">它解决什么问题</a></li><li><a href="#trial">隔离试用</a></li>
+      <li><a href="#commands">命令怎么选</a></li><li><a href="#daily">日常工作流</a></li>
+      <li><a href="#config">配置与存储</a></li><li><a href="#cloud">云端 Provider</a></li>
+      <li><a href="#recovery">故障恢复</a></li><li><a href="#source">沿源码走一遍</a></li>
+      <li><a href="#check">自检</a></li>
+    </ol></nav>
+    <main>
+      <div class="intro"><p class="eyebrow">使用教程 · 当前工作树</p><h1>从零使用这个 RAG Extension</h1>
+        <p class="lede">目标是亲手完成一次小范围索引、查询和自动注入，再看懂 Provider 切换与索引重建。命令以当前 <code>feat/cloud-research-rag</code> 工作树为准；这份工作树含未提交修改，所以试用时直接加载本地 <code>index.ts</code>。</p>
+        <p class="stamp">核对日期：2026-09-25 · 当前 HEAD：ff5254e · 当前仓库：pi-local-rag 0.4.1</p>
+      </div>
+
+      <h2 id="mental-model">1. 先建立一张心智图</h2>
+      <p>RAG 是“先检索，再把找到的内容交给模型”。这套 Extension 把你的本地文档切成片段，生成向量，连同关键词索引存入 SQLite。搜索时合并 BM25 关键词分数与向量相似度；开启自动注入后，每轮提问前会检索，并把相关片段作为隐藏的 <code>customType: "rag"</code> 消息放入上下文。</p>
+      <div class="flow">文件 → 解析/分块 → Embedding → SQLite 索引
+提问 → BM25 + 向量检索 → 可选 Rerank → Pi 上下文</div>
+      <p>这里有三个独立动作：<strong>索引</strong>负责准备资料，<strong>查询</strong>负责检查召回，<strong>自动注入</strong>负责让 Pi 在普通对话中使用检索结果。<code>/rag off</code> 只关闭最后一步，手动 <code>/rag search</code> 仍可使用。源码入口见 <a href="../../index.ts">index.ts</a> 与 <a href="../../retrieval.ts">retrieval.ts</a>。</p>
+
+      <h2 id="trial">2. 用隔离目录完成第一次试用</h2>
+      <p>先在终端切到这个仓库。下面的 Zsh 命令会创建一个临时示例文档和独立索引目录；<code>PI_RAG_LEGACY_DIR</code> 也指向临时目录，避免试用时触碰旧的 <code>~/.pi/lens</code> 迁移路径。</p>
+      <pre><code>cd /Users/chouchao/Desktop/rag-test/pi-local-rag
+rag_trial_root=$(mktemp -d /tmp/pi-rag-lesson.XXXXXX)
+mkdir -p "$rag_trial_root/docs"
+cat &gt; "$rag_trial_root/docs/webhook.md" &lt;&lt;'EOF'
+# Webhook 签名验证
+
+收到回调后先读取 X-Signature，再用服务端密钥计算 HMAC。
+签名不一致时返回 401，不执行后续业务写入。
+EOF
+
+PI_RAG_DIR="$rag_trial_root/store" \
+PI_RAG_LEGACY_DIR="$rag_trial_root/legacy" \
+pi --no-extensions -e "$PWD/index.ts"</code></pre>
+      <p>进入 Pi 后，依次输入：</p>
+      <pre><code>/rag off
+/rag index /tmp/这里替换为上一步实际的目录/docs/webhook.md
+/rag status
+/rag search webhook 签名验证
+/rag on</code></pre>
+      <div class="callout warn"><strong>路径替换：</strong>Pi 输入框不会展开 Shell 变量。先在终端运行 <code>printf '%s\n' "$rag_trial_root/docs/webhook.md"</code>，复制它输出的绝对路径，再填入 <code>/rag index</code>。首次使用本地模型可能需要下载模型文件；下载、ONNX 加载和真实 Pi 会话尚未在本轮验证。</div>
+      <p><code>/rag status</code> 应看到独立的 Storage 路径、1 个已索引文件、非零 Chunks 与 Vectors。若搜索命中，再用自然语言问 Pi“这个 webhook 校验失败时应做什么？”；这才是在检查自动注入。索引命令和手动搜索成功，并不等于模型一定引用了片段，仍要看回答与源内容是否相符。</p>
+
+      <h2 id="commands">3. 常用命令按场景选择</h2>
+      <div class="table-wrap"><table><thead><tr><th>场景</th><th>命令</th><th>实际作用</th></tr></thead><tbody>
+        <tr><td>首次加入资料</td><td><code>/rag index &lt;绝对路径&gt;</code></td><td>扫描可索引文件，记录 tracked path，并建立索引。</td></tr>
+        <tr><td>检查资料能否搜到</td><td><code>/rag search &lt;问题&gt;</code></td><td>返回片段、来源位置与分数；云端查询失败时可能标注 <code>degraded</code>。</td></tr>
+        <tr><td>只找已索引文件名</td><td><code>/rag find *.md</code></td><td>按 glob 列出索引中的文件，不搜索内容。</td></tr>
+        <tr><td>文件改动后</td><td><code>/rag refresh</code></td><td>按 tracked paths 扫描新文件与改动文件，尽量跳过未变文件。</td></tr>
+        <tr><td>更改排除规则后</td><td><code>/rag exclude dist/</code><br><code>/rag rebuild</code></td><td>排除规则写入配置；重建时才重新应用到已有索引。</td></tr>
+        <tr><td>换模型、维度或处理规则</td><td><code>/rag rebuild --force</code></td><td>重新生成全部向量；成功后切换活动索引。</td></tr>
+        <tr><td>控制自动注入</td><td><code>/rag off</code> / <code>/rag on</code></td><td>影响 Pi 每轮自动检索，不删除索引。</td></tr>
+        <tr><td>检查状态</td><td><code>/rag status</code><br><code>/rag config</code></td><td>前者看数据、模型和重建提示；后者看配置文件问题。</td></tr>
+      </tbody></table></div>
+      <p><code>/rag ext list|add|remove|reset</code> 管理可索引扩展名。<code>/rag clear</code> 清空当前索引中的数据，适合你确实要清空当前 store 时使用。Pi 还注册了 <code>rag_index</code>、<code>rag_query</code>、<code>rag_status</code> 三个工具，Agent 可以调用；手动操作用 <code>/rag</code> 命令更容易观察每一步。源码见 <a href="../../index.ts">index.ts</a> 的 command 与 tool 注册。</p>
+
+      <h2 id="daily">4. 建议的日常工作流</h2>
+      <ol>
+        <li>先用 <code>/rag status</code> 确认 Storage 指向预期项目，<code>Rebuild needed</code> 为 <code>no</code>。</li>
+        <li>用 <code>/rag index &lt;文件或目录&gt;</code> 加入资料。目录很大时先用小目录验证检索效果。</li>
+        <li>用两三个具体问题跑 <code>/rag search</code>，检查片段内容、文件和页码或行号是否正确。</li>
+        <li>确认召回合适后用 <code>/rag on</code>，进行普通对话。资料更新后手动 <code>/rag refresh</code>。</li>
+      </ol>
+      <p>本地模型下，索引超过 24 小时且每小时节流检查允许时，会在下一轮开始前尝试刷新；云端 Provider 默认不自动刷新，除非 <code>cloudAutoRefresh: true</code>。所以云端模式下，更新资料后优先主动运行 <code>/rag refresh</code>。实现见 <a href="../../indexing.ts">indexing.ts</a> 的 <code>shouldAutoRefresh</code> 和 <a href="../../index.ts">index.ts</a> 的 <code>before_agent_start</code>。</p>
+
+      <h2 id="config">5. 配置、Provider 注册表和存储位置</h2>
+      <p><code>PI_RAG_DIR</code> 指定本次会话的索引目录，优先于从当前工作目录向上寻找 <code>.pi/rag/</code>；未指定且没有项目目录时，回退到 <code>~/.pi/rag/</code>。首次 <code>/rag index</code> 在项目内也可能创建 <code>.pi/rag/</code>。所以不确定时先看 <code>/rag status</code> 的 Storage 字段。路径规则在 <a href="../../store.ts">store.ts</a>。</p>
+      <p>索引目录内的 <code>config.json</code> 选择当前模型和运行参数。仓库根的 <code>provider.json</code> 是内置注册表；如果索引目录内也有 <code>provider.json</code>，后者覆盖前者。Registry key（如 <code>voyage</code>）是配置里填写的 provider 值；<code>type</code>（如 <code>voyage</code>）决定 TypeScript 使用哪个协议适配器。JSON 不能凭空实现新的 HTTP 协议。解析代码在 <a href="../../provider-config.ts">provider-config.ts</a>。</p>
+      <p>默认配置是本地 <code>Xenova/all-MiniLM-L6-v2</code>、384 维、无 Rerank；<code>ragTopK=5</code>、<code>ragAlpha=0.4</code>、<code>ragScoreThreshold=0.1</code>。<code>ragAlpha=1</code> 更偏向 BM25，<code>0</code> 更偏向向量，但前提是向量检索可用。云端临时覆盖要把 provider、model、dimensions 三者配成注册表中同一模型；只改 provider 名会因模型/维度不匹配而报错。默认值和验证见 <a href="../../config.ts">config.ts</a>。</p>
+
+      <h2 id="cloud">6. 需要云端 Embedding 时怎么切换</h2>
+      <p>建议先使用第二个独立 store 做云端试验。把下面文件写入 <code>$rag_trial_root/cloud-store/config.json</code>。这里选择内置 Voyage <code>voyage-4-lite</code>（1024 维）和 <code>rerank-2.5-lite</code>；请求会调用云端服务并产生相应费用。</p>
+      <pre><code>mkdir -p "$rag_trial_root/cloud-store"
+cat &gt; "$rag_trial_root/cloud-store/config.json" &lt;&lt;'EOF'
+{
+  "ragEnabled": false,
+  "embedding": { "provider": "voyage", "model": "voyage-4-lite", "dimensions": 1024 },
+  "reranker": { "provider": "voyage", "model": "rerank-2.5-lite" },
+  "cloudAutoRefresh": false
+}
+EOF
+
+read -s "VOYAGE_API_KEY?Voyage API key: "
+echo
+export VOYAGE_API_KEY
+PI_RAG_DIR="$rag_trial_root/cloud-store" \
+PI_RAG_LEGACY_DIR="$rag_trial_root/legacy" \
+pi --no-extensions -e "$PWD/index.ts"</code></pre>
+      <p>进入 Pi 后，先 <code>/rag config</code>、<code>/rag status</code>，再用示例文档执行 <code>/rag index &lt;绝对路径&gt;</code> 与 <code>/rag search &lt;问题&gt;</code>。当结果和来源符合预期，再执行 <code>/rag on</code>。密钥只通过 <code>VOYAGE_API_KEY</code> 环境变量传入，不写入两个 JSON 文件。Provider 定义见 <a href="../../provider.json">provider.json</a>，密钥解析见 <a href="../../provider-config.ts">provider-config.ts</a>。</p>
+      <p>如果要使用兼容 Voyage 协议的代理，可在当前 store 的 <code>provider.json</code> 中定义新 key、<code>type: "voyage"</code>、<code>baseUrl</code>、<code>auth.env</code> 与模型维度，然后在 <code>config.json</code> 中选择该 key。可先阅读已有的 <a href="provider-rag-code-reading.html">Provider 源码阅读课</a>，再修改自己的项目配置。</p>
+
+      <h2 id="recovery">7. 遇到问题时怎么判断</h2>
+      <div class="table-wrap"><table><thead><tr><th>看到什么</th><th>先查什么</th><th>下一步</th></tr></thead><tbody>
+        <tr><td><code>config.json is invalid</code></td><td><code>/rag config</code></td><td>手工修正 JSON；若要恢复默认，<code>/rag config reset</code> 会先保留 <code>.broken-*</code> 备份。</td></tr>
+        <tr><td><code>Rebuild needed: yes</code></td><td><code>/rag status</code> 的 wanted/active 模型与 reason</td><td>确认 tracked paths 后运行 <code>/rag rebuild --force</code>；完成后重新查询。</td></tr>
+        <tr><td><code>degraded</code> 或 <code>bm25-fallback</code></td><td>密钥、网络、Embedding 服务与错误文本</td><td>结果可能只来自关键词检索，不要当成完整的混合检索成功。</td></tr>
+        <tr><td>刷新拒绝或资料缺失</td><td><code>/rag status</code> 的 tracked paths</td><td>先恢复不可访问的路径；程序会拒绝因扫描失败而误删旧索引。</td></tr>
+        <tr><td>搜索不到应有内容</td><td>Storage、扩展名、exclude、文件是否真的索引</td><td>先 <code>/rag find</code>，再 <code>/rag refresh</code>；改了排除规则则 <code>/rag rebuild</code>。</td></tr>
+      </tbody></table></div>
+      <p>全量重建会先在 staging 生成新索引，成功且向量覆盖完整后才切换 <code>active.json</code>；失败不会发布 staging。这个保护不等于“所有数据都备份好了”，仍要留意实际 Storage 路径。实现见 <a href="../../indexing.ts">indexing.ts</a> 的 <code>rebuildWithSwitch</code> 和 <a href="../../index-manager.ts">index-manager.ts</a> 的 <code>finalizeStaging</code>。</p>
+
+      <h2 id="source">8. 沿一次真实提问读源码</h2>
+      <ol>
+        <li><a href="../../index.ts">index.ts</a> 的 <code>before_agent_start</code> 先读取配置、检查开关与索引兼容性。</li>
+        <li><a href="../../retrieval.ts">retrieval.ts</a> 的 <code>retrieve</code> 调用 <a href="../../search.ts">search.ts</a> 的 <code>hybridSearchDetailed</code>，再按配置尝试 Rerank。</li>
+        <li><a href="../../providers/embedding/factory.ts">providers/embedding/factory.ts</a> 为活动索引选择对应 Embedding Provider；查询不能随意改用另一套维度。</li>
+        <li><a href="../../context.ts">context.ts</a> 的 <code>buildContext</code> 将检索片段压入上下文预算，并保留可读的来源位置。</li>
+        <li>在 Pi 中手动执行 <code>/rag search</code> 或让 Agent 调用 <code>rag_query</code>，走的是同一检索入口，但输出形式不同。</li>
+      </ol>
+      <p class="source">继续深入：<a href="provider-rag-code-reading.html">云端 Provider 代码阅读课</a> 从 Registry、Factory、HTTP 请求讲到 Fingerprint。</p>
+
+      <h2 id="check">9. 三个自检问题</h2>
+      <div class="check"><ol>
+        <li>执行 <code>/rag off</code> 后，<code>/rag search</code> 还能不能用？原因是什么？</li>
+        <li>把 embedding 从本地 384 维改为 Voyage 1024 维后，为什么不能沿用旧向量索引？</li>
+        <li><code>/rag status</code> 显示正确的 Storage，但结果标了 <code>bm25-fallback</code>。此时你已经验证了什么，还没验证什么？</li>
+      </ol><p>你可以先按本页完成一次小试用，再回答这三问；页面完成不代表已经掌握。</p></div>
+    </main>
+  </div>
+  <footer>本课基于 2026-09-25 当前工作树核对。已验证 TypeScript 类型检查和定向离线测试；未在本轮运行真实 ONNX 下载、Voyage 服务或完整 Pi 对话验收。</footer>
+</body>
+</html>

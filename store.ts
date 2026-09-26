@@ -75,6 +75,8 @@ export function legacyIndexFile(ragDir: string): string { return join(ragDir, "i
 /** @deprecated use dbFile/legacyIndexFile. Kept temporarily for callers that still reach for the JSON path. */
 export function indexFile(ragDir: string): string { return join(ragDir, "index.json"); }
 export function configFile(ragDir: string): string { return join(ragDir, "config.json"); }
+/** User/project provider registry. The loader falls back to the bundled file. */
+export function providerFile(ragDir: string): string { return join(ragDir, "provider.json"); }
 
 export function ensureDir(ragDir: string) {
   if (existsSync(ragDir)) return;

@@ -8,9 +8,9 @@ import { initSchema } from "../repository.ts";
 import * as repo from "../repository.ts";
 import { defaultConfig } from "../config.ts";
 import {
-  checkIndexCompatibility, stampFingerprints, prepareStagingDir, publishActiveManifest, resolveActiveDbPath,
+  checkIndexCompatibility, stampFingerprints, prepareStagingDir, finalizeStaging, resolveActiveDbPath,
 } from "../index-manager.ts";
-import { embeddingFingerprintFromConfig, processingFingerprintFromConfig, serializeFingerprint } from "../fingerprint.ts";
+import { processingFingerprintFromConfig, serializeFingerprint } from "../fingerprint.ts";
 
 describe("index compatibility and staging switch", () => {
   let ragDir: string;
@@ -34,6 +34,14 @@ describe("index compatibility and staging switch", () => {
     initSchema(db, dim);
     return db;
   }
+
+  it("processing fingerprint includes chunker token bounds", () => {
+    const p = processingFingerprintFromConfig();
+    expect(p.targetTokens).toBe(180);
+    expect(p.maxTokens).toBe(240);
+    expect(p.overlapTokens).toBe(30);
+    expect(p.chunker).toBe("token-v3");
+  });
 
   it("empty index is compatible with the current config", () => {
     const db = mem();
@@ -77,21 +85,14 @@ describe("index compatibility and staging switch", () => {
     const cfg = defaultConfig();
     cfg.embedding = { provider: "voyage", model: "voyage-4-lite", dimensions: 1024 };
     const spec = prepareStagingDir(cfg, ragDir);
-    expect(spec.dbPath).toContain("indexes");
+    expect(spec.dbPath).toContain("staging");
     expect(spec.dbPath).not.toBe(join(ragDir, "rag.db"));
     expect(existsSync(join(ragDir, "rag.db"))).toBe(true);
     expect(resolveActiveDbPath(ragDir)).toBe(join(ragDir, "rag.db"));
-    publishActiveManifest(ragDir, {
-      version: 1,
-      indexId: spec.indexId,
-      relativeDbPath: spec.relativeDbPath,
-      embeddingFingerprint: serializeFingerprint(embeddingFingerprintFromConfig(cfg.embedding)),
-      processingFingerprint: serializeFingerprint(processingFingerprintFromConfig(cfg)),
-      createdAt: new Date().toISOString(),
-    });
-    mkdirSync(join(spec.dbPath, ".."), { recursive: true });
     writeFileSync(spec.dbPath, "new");
-    expect(resolveActiveDbPath(ragDir)).toBe(spec.dbPath);
+    const published = finalizeStaging(ragDir, spec, cfg);
+    expect(published.relativeDbPath).toContain("indexes");
+    expect(resolveActiveDbPath(ragDir)).toBe(join(ragDir, published.relativeDbPath));
     expect(existsSync(join(ragDir, "rag.db"))).toBe(true);
   });
 
@@ -104,6 +105,7 @@ describe("index compatibility and staging switch", () => {
     stampFingerprints(db, defaultConfig());
     repo.setMetadata(db, repo.MetadataKey.ProcessingFingerprint, serializeFingerprint({
       parser: "blocks-v1", chunker: "other-chunker", maxLines: 50,
+      targetTokens: 180, maxTokens: 240, overlapTokens: 30,
     }));
     const r = checkIndexCompatibility(db, defaultConfig());
     expect(r.ok).toBe(false);

@@ -1,20 +1,19 @@
 import { basename } from "node:path";
 import type Database from "better-sqlite3";
 import { getDbConn, closeDbConn, openDbAt, type IndexStats } from "./db.ts";
-import { VECTOR_DIM } from "./constants.ts";
-import { chunkBlocks, sha256, type TextChunk } from "./chunking.ts";
+import { VECTOR_DIM, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS, CHUNK_TARGET_TOKENS } from "./constants.ts";
+import { chunkBlocks, estimateTokens, sha256, type TextChunk } from "./chunking.ts";
 import { extractBlocks } from "./parsing.ts";
 import * as repo from "./repository.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type RagConfig } from "./config.ts";
 import { createEmbeddingProvider, embeddingProviderForIndex } from "./providers/embedding/factory.ts";
 import {
   checkIndexCompatibility, stampFingerprints, withIndexWriteLock,
-  prepareStagingDir, publishActiveManifest, checkpointAndClose,
+  prepareStagingDir, finalizeStaging, checkpointAndClose,
 } from "./index-manager.ts";
+import { isAbortError, throwIfAborted } from "./abort.ts";
 import { getRagDir } from "./store.ts";
-import {
-  embeddingFingerprintFromConfig, processingFingerprintFromConfig, serializeFingerprint,
-} from "./fingerprint.ts";
+import { getModelSpec } from "./provider-config.ts";
 
 export interface ProgressCallbacks {
   onFile?: (current: number, total: number, filename: string, skipped: number) => void;
@@ -30,6 +29,21 @@ export interface ProgressCallbacks {
 export function isIndexStale(index: IndexStats, maxAgeMs = 24 * 60 * 60 * 1000): boolean {
   if (!index.lastBuild) return false;
   return Date.now() - new Date(index.lastBuild).getTime() > maxAgeMs;
+}
+
+/** Local indexes keep 24h refresh. Cloud indexes refresh only when cloudAutoRefresh is on. */
+export function shouldAutoRefresh(config: RagConfig, stats: IndexStats): boolean {
+  if (!isIndexStale(stats)) return false;
+  let isLocal = false;
+  try {
+    isLocal = getModelSpec(config.embedding.provider, "embedding", config.embedding.model).type === "transformers";
+  } catch {
+    // Config validation reports the detailed provider error. Do not silently
+    // enable a cloud refresh when the registry cannot be resolved.
+    isLocal = false;
+  }
+  if (!isLocal && config.cloudAutoRefresh !== true) return false;
+  return true;
 }
 
 const yield_ = () => new Promise<void>(r => setTimeout(r, 0));
@@ -87,7 +101,7 @@ function replaceFileIndex(database: Database.Database, fw: FileWork, indexedAt: 
         id: `${sha256(fw.fp)}-${c.chunkIndex ?? j}`,
         filePath: fw.fp, content: c.content,
         lineStart: c.lineStart, lineEnd: c.lineEnd, hash: c.hash,
-        indexedAt, tokens: Math.ceil(c.content.length / 4),
+        indexedAt, tokens: estimateTokens(c.content),
         pageStart: c.pageStart ?? null,
         pageEnd: c.pageEnd ?? null,
         section: c.section ?? null,
@@ -96,7 +110,10 @@ function replaceFileIndex(database: Database.Database, fw: FileWork, indexedAt: 
       repo.insertVector(database, Number(chunkResult.lastInsertRowid), vectors![j]);
       n++;
     }
-    repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true);
+    repo.upsertFile(database, fw.fp, fw.hash, fw.rawChunks.length, indexedAt, fw.size, true, {
+      documentId: sha256(fw.fp),
+      title: basename(fw.fp),
+    });
     return n;
   })();
 }
@@ -106,41 +123,55 @@ export async function indexFiles(
   progress?: ProgressCallbacks,
   _db?: Database.Database,
   force?: boolean,
+  signal?: AbortSignal,
 ): Promise<IndexFilesResult> {
-  return withIndexWriteLock(() => indexFilesUnlocked(paths, progress, _db, force));
+  return withIndexWriteLock(() => indexFilesUnlocked(paths, progress, _db, force, signal));
 }
 
 export async function rebuildWithSwitch(
   paths: string[],
   progress?: ProgressCallbacks,
   force?: boolean,
+  droppedFiles?: string[],
+  signal?: AbortSignal,
 ): Promise<IndexFilesResult> {
   return withIndexWriteLock(async () => {
     const config = loadConfig();
     const ragDir = getRagDir();
     const live = getDbConn();
     const compat = checkIndexCompatibility(live, config);
-    if (compat.ok) {
-      return indexFilesUnlocked(paths, progress, live, force);
+    const useStaging = !!force || !compat.ok;
+    if (!useStaging) {
+      const result = await indexFilesUnlocked(paths, progress, live, force, signal);
+      throwIfAborted(signal);
+      if (result.failed === 0 && droppedFiles?.length) {
+        for (const f of droppedFiles) repo.deleteIndexedFile(live, f);
+      }
+      return result;
     }
     const spec = prepareStagingDir(config, ragDir);
     const staging = openDbAt(spec.dbPath, config.embedding.dimensions);
     try {
-      const result = await indexFilesUnlocked(paths, progress, staging, true);
+      const result = await indexFilesUnlocked(paths, progress, staging, true, signal);
       if (result.failed > 0) {
         checkpointAndClose(staging);
         return result;
       }
+      const chunks = repo.countChunksTotal(staging);
+      const vecs = repo.getEmbeddedCount(staging);
+      if (chunks > 0 && vecs !== chunks) {
+        checkpointAndClose(staging);
+        return {
+          ...result,
+          failed: result.failed + 1,
+          errors: [...result.errors, `vector coverage ${vecs}/${chunks}; refusing to publish staging`],
+        };
+      }
+      throwIfAborted(signal);
       stampFingerprints(staging, config);
       checkpointAndClose(staging);
-      publishActiveManifest(ragDir, {
-        version: 1,
-        indexId: spec.indexId,
-        relativeDbPath: spec.relativeDbPath,
-        embeddingFingerprint: serializeFingerprint(embeddingFingerprintFromConfig(config.embedding)),
-        processingFingerprint: serializeFingerprint(processingFingerprintFromConfig(config)),
-        createdAt: new Date().toISOString(),
-      });
+      throwIfAborted(signal);
+      finalizeStaging(ragDir, spec, config);
       closeDbConn();
       return result;
     } catch (err) {
@@ -155,6 +186,7 @@ async function indexFilesUnlocked(
   progress?: ProgressCallbacks,
   _db?: Database.Database,
   force?: boolean,
+  signal?: AbortSignal,
 ): Promise<IndexFilesResult> {
   const hadCallbacks = !!progress;
   if (hadCallbacks) _suppressStderr = true;
@@ -166,6 +198,7 @@ async function indexFilesUnlocked(
   });
 
   try {
+    throwIfAborted(signal);
     if (total === 0) return empty();
 
     const config = loadConfig();
@@ -188,7 +221,7 @@ async function indexFilesUnlocked(
 
     const readQueue: ReadResult[] = [];
     let readQueueDone = false;
-    let readErrorCount = 0;
+    const readErrors: string[] = [];
     let resolveRead: (() => void) | null = null;
     const notifyRead = () => { resolveRead?.(); resolveRead = null; };
     const waitRead = () => new Promise<void>(r => { resolveRead = r; });
@@ -200,20 +233,33 @@ async function indexFilesUnlocked(
     for (let w = 0; w < workerCount; w++) {
       producers.push((async () => {
         while (true) {
+          throwIfAborted(signal);
           const i = pathsIdx++;
           if (i >= paths.length) { producersDone++; if (producersDone >= workerCount) { readQueueDone = true; notifyRead(); } return; }
           try {
             const parsed = await extractBlocks(paths[i]);
-            const raw = chunkBlocks(parsed.blocks);
+            const raw = chunkBlocks(parsed.blocks, {
+              targetTokens: CHUNK_TARGET_TOKENS,
+              maxTokens: CHUNK_MAX_TOKENS,
+              overlapTokens: CHUNK_OVERLAP_TOKENS,
+            });
             readQueue.push({ fp: paths[i], hash: parsed.hash, size: parsed.size, raw });
             notifyRead();
-          } catch {
-            readErrorCount++;
-            stderrProgress(`[${i + 1}/${total}] ERROR ${basename(paths[i])}: not found or unreadable`);
+          } catch (err) {
+            if (isAbortError(err)) throw err;
+            const msg = err instanceof Error ? err.message : String(err);
+            readErrors.push(`${paths[i]}: ${msg}`);
+            stderrProgress(`[${i + 1}/${total}] ERROR ${basename(paths[i])}: ${msg}`);
+            notifyRead();
           }
         }
       })());
     }
+    const producersDoneP = Promise.all(producers).catch(err => {
+      readQueueDone = true;
+      notifyRead();
+      throw err;
+    });
 
     const toIndex: FileWork[] = [];
     let skipped = 0;
@@ -256,14 +302,15 @@ async function indexFilesUnlocked(
     };
 
     while (!readQueueDone || readQueue.length > 0) {
+      throwIfAborted(signal);
       drainReads();
       if (!readQueueDone) await waitRead();
       await maybeYield();
     }
     drainReads();
+    await producersDoneP;
     await yield_();
-
-    skipped += readErrorCount;
+    throwIfAborted(signal);
 
     // Phase 2: embed in cross-file groups
     const EMBED_GROUP_TARGET = 256;
@@ -275,7 +322,9 @@ async function indexFilesUnlocked(
       if (groupChunks.length === 0) return;
       const texts = groupChunks.map(g => g.fw.rawChunks[g.ci].content);
       stderrProgress(`Embedding ${globalChunkIdx - groupChunks.length + 1}…${globalChunkIdx}/${totalChunks} chunks`);
-      const vectors = await provider.embedDocuments(texts);
+      throwIfAborted(signal);
+      const vectors = await provider.embedDocuments(texts, { signal });
+      throwIfAborted(signal);
       if (!Array.isArray(vectors) || vectors.length !== texts.length) {
         throw new Error(`embedBatch returned ${Array.isArray(vectors) ? vectors.length : "non-array"} vectors for ${texts.length} texts`);
       }
@@ -299,18 +348,21 @@ async function indexFilesUnlocked(
         }
       }
       await flushGroup();
+      throwIfAborted(signal);
     } catch (err) {
-      // Embed failed before any replacement transaction. Live index is unchanged.
+      if (isAbortError(err)) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       return {
         indexed: 0,
         chunks: 0,
         skipped,
-        failed: toIndex.length,
-        errors: toIndex.map(fw => `${fw.fp}: ${msg}`),
+        failed: toIndex.length + readErrors.length,
+        errors: [...readErrors, ...toIndex.map(fw => `${fw.fp}: ${msg}`)],
         durationMs: Date.now() - startMs,
       };
     }
+
+    throwIfAborted(signal);
 
     // Phase 3: replace each file in its own transaction only after vectors validate.
     let chunked = 0;
@@ -318,6 +370,7 @@ async function indexFilesUnlocked(
     const errors: string[] = [];
     const indexedAt = new Date().toISOString();
     for (const fw of toIndex) {
+      throwIfAborted(signal);
       if (!fileVectorsReady(fw, provider.dimensions)) {
         errors.push(`${fw.fp}: missing or invalid embedding vectors; keeping previous index`);
         continue;
@@ -331,6 +384,7 @@ async function indexFilesUnlocked(
       }
     }
 
+    throwIfAborted(signal);
     if (!hadCallbacks) process.stderr.write(`\r\x1b[2K`);
     progress?.onSave?.();
     if (indexed > 0 || (toIndex.length === 0 && errors.length === 0)) {
@@ -339,7 +393,12 @@ async function indexFilesUnlocked(
       stampFingerprints(database, config);
     }
 
-    return { indexed, chunks: chunked, skipped, failed: errors.length, errors, durationMs: Date.now() - startMs };
+    return {
+      indexed, chunks: chunked, skipped,
+      failed: errors.length + readErrors.length,
+      errors: [...readErrors, ...errors],
+      durationMs: Date.now() - startMs,
+    };
   } finally {
     if (hadCallbacks) _suppressStderr = false;
   }

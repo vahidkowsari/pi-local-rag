@@ -29,6 +29,8 @@
  *   constants.ts     — shared constants, file ext sets, size limits
  *   store.ts         — RAG_DIR / LEGACY_DIR / file paths / ensureDir + legacy migration
  *   config.ts        — RagConfig type, loadConfig / saveConfig, ext helpers
+ *   provider.json    — provider/model registry; no API keys are stored here
+ *   provider-config.ts — provider.json loader and model resolution
  *   db.ts            — RagDatabase singleton, getDbConn / getFreshDbConn, loadIndex
  *   repository.ts    — SQL statements and schema
  *   chunking.ts      — sha256, chunkText, collectFiles, extractText (txt/pdf/docx/html)
@@ -44,26 +46,36 @@ import { existsSync } from "node:fs";
 import { resolve, extname, basename, relative } from "node:path";
 import ignore from "ignore";
 
-import { RST, B, D, GREEN, CYAN } from "./constants.ts";
+import { RST, B, D, GREEN, CYAN, AUTO_INJECT_DEADLINE_MS } from "./constants.ts";
 import { getRagDir, GLOBAL_RAG_DIR } from "./store.ts";
-import { loadConfig, saveConfig, normalizeExt, resolveExtensions } from "./config.ts";
+import {
+  loadConfig, loadConfigDetailed, requireWritableConfig, resetBrokenConfig, saveConfig,
+  normalizeExt, resolveExtensions, ConfigFileInvalidError,
+} from "./config.ts";
 import {
   getDbConn, loadIndex, getIndexStats, clearIndex,
-  listIndexedFilePaths, pruneIndexedFile, markFileUnembedded,
+  listIndexedFilePaths,
 } from "./db.ts";
-import { collectFiles, collectFromTracked, collectFromTrackedAsync, isExcludedByConfig } from "./chunking.ts";
-import { indexFiles, isIndexStale, rebuildWithSwitch } from "./indexing.ts";
-import { retrieve } from "./retrieval.ts";
-import { buildContext } from "./context.ts";
+import {
+  collectFiles, collectFromTrackedDetailed, collectFromTrackedDetailedAsync, isExcludedByConfig,
+} from "./chunking.ts";
+import { indexFiles, rebuildWithSwitch, shouldAutoRefresh } from "./indexing.ts";
+import { retrieve, retrieveWithCandidates } from "./retrieval.ts";
+import { buildContext, formatSourceLoc } from "./context.ts";
+import { checkIndexCompatibility, IndexIncompatibleError } from "./index-manager.ts";
+import { isAbortError, withDeadline } from "./abort.ts";
 
 // Re-export the public surface so existing consumers of `pi-local-rag` keep
 // working (tests, downstream code that imports from the package root).
 export { DEFAULT_TEXT_EXTS } from "./constants.ts";
-export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR } from "./store.ts";
+export { getRagDir, GLOBAL_RAG_DIR, LEGACY_DIR, providerFile } from "./store.ts";
+export type { ModelRole, ProviderDefinition, ProviderFile, ResolvedModel } from "./provider-config.ts";
+export { ProviderConfigError, getModelSpec, loadProviderFile, providerFilePath, resolveModel } from "./provider-config.ts";
 export type { RagConfig, EmbeddingConfig, RerankerConfig, HttpConfig } from "./config.ts";
 export {
-  loadConfig, saveConfig, defaultConfig, normalizeExt, resolveExtensions,
-  validateConfig, applyEnvOverrides, voyageApiKey,
+  loadConfig, loadConfigDetailed, getConfigLoad, requireWritableConfig, resetBrokenConfig, saveConfig,
+  defaultConfig, normalizeExt, resolveExtensions,
+  validateConfig, applyEnvOverrides, voyageApiKey, ConfigFileInvalidError, blockingConfigIssues,
   DEFAULT_VOYAGE_EMBED_MODEL, DEFAULT_VOYAGE_EMBED_DIM, DEFAULT_VOYAGE_RERANK_MODEL,
 } from "./config.ts";
 export type { Chunk, IndexMeta, IndexStats } from "./db.ts";
@@ -72,7 +84,8 @@ export {
   loadIndex, saveIndex, getIndexStats, initSchema, float32ToBuffer, clearIndex,
 } from "./db.ts";
 export {
-  sha256, chunkText, chunkBlocks, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
+  sha256, chunkText, chunkBlocks, estimateTokens, collectFiles, collectFilesAsync, collectFromTracked, collectFromTrackedAsync,
+  collectFromTrackedDetailed, collectFromTrackedDetailedAsync,
   isExcludedByConfig, extractText, getOcrTooling, isSparsePdfText,
 } from "./chunking.ts";
 export { extractBlocks } from "./parsing.ts";
@@ -81,17 +94,22 @@ export { embed, embedBatch } from "./embed.ts";
 export type { EmbeddingProvider, EmbedBatchOptions } from "./providers/embedding/types.ts";
 export { LocalEmbeddingProvider, getLocalEmbeddingProvider } from "./providers/embedding/local.ts";
 export { VoyageEmbeddingProvider } from "./providers/embedding/voyage.ts";
-export { createEmbeddingProvider } from "./providers/embedding/factory.ts";
+export { createEmbeddingProvider, embeddingProviderForIndex, resetEmbeddingProviderCache } from "./providers/embedding/factory.ts";
 export type { ScoredChunk } from "./search.ts";
-export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch } from "./search.ts";
-export { retrieve } from "./retrieval.ts";
+export { cosineSimilarity, normalize, bm25ToRelevance, hybridSearch, hybridSearchDetailed } from "./search.ts";
+export { retrieve, retrieveWithCandidates } from "./retrieval.ts";
 export type { RetrievedChunk } from "./retrieval.ts";
-export { buildContext, estimatedTokenCounter } from "./context.ts";
+export { buildContext, estimatedTokenCounter, formatSourceLoc } from "./context.ts";
 export { NoneReranker } from "./providers/reranker/none.ts";
 export { VoyageReranker } from "./providers/reranker/voyage.ts";
 export { createReranker } from "./providers/reranker/factory.ts";
-export { isIndexStale, indexFiles, rebuildWithSwitch } from "./indexing.ts";
+export { isIndexStale, shouldAutoRefresh, indexFiles, rebuildWithSwitch } from "./indexing.ts";
+export { checkIndexCompatibility, IndexIncompatibleError, prepareStagingDir, finalizeStaging, stampFingerprints } from "./index-manager.ts";
 export type { ProgressCallbacks, IndexFilesResult } from "./indexing.ts";
+
+function invalidConfigNotice(issues: string[]): string {
+  return `config.json is invalid. Repair the file or run /rag config reset (the original is saved as a .broken backup).\n${issues.join("\n")}`;
+}
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
@@ -100,46 +118,95 @@ export default function (pi: ExtensionAPI) {
   // the filesystem on every agent turn (matches the upstream fork's
   // lastStaleCheckMs pattern from kallewoof@849e485).
   let lastStaleCheckMs = 0;
+  let lastCompatNotifyMs = 0;
   const STALE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
   // ── Auto-inject RAG context before every agent turn ──
   pi.on("before_agent_start", async (event, _ctx) => {
-    const config = loadConfig();
+    const loaded = loadConfigDetailed();
+    const config = loaded.config;
     if (!config.ragEnabled) return;
+    if (loaded.fileStatus === "invalid") {
+      const t = Date.now();
+      if (t - lastCompatNotifyMs > STALE_CHECK_INTERVAL_MS) {
+        lastCompatNotifyMs = t;
+        process.stderr.write(`\r\x1b[2K[rag] Skipping auto-inject: ${invalidConfigNotice(loaded.issues)}\n`);
+      }
+      return;
+    }
+    const signal = withDeadline(undefined, AUTO_INJECT_DEADLINE_MS);
 
-    // Singleton connection: do not close it here. closeDbConn() is owned by
-    // the process/test lifecycle; closing the handle would poison later
-    // getDbConn() callers until reopen.
     const database = getDbConn();
     const stats = getIndexStats(database);
     if (stats.totalChunks === 0) return;
 
+    const compat = checkIndexCompatibility(database, config);
+    if (!compat.ok) {
+      const now = Date.now();
+      if (now - lastCompatNotifyMs > STALE_CHECK_INTERVAL_MS) {
+        lastCompatNotifyMs = now;
+        process.stderr.write(`\r\x1b[2K[rag] Skipping auto-inject: ${compat.reason}\n`);
+      }
+      return;
+    }
+
     const now = Date.now();
-    if (isIndexStale(stats) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
+    if (shouldAutoRefresh(config, stats) && now - lastStaleCheckMs > STALE_CHECK_INTERVAL_MS) {
       lastStaleCheckMs = now;
-      // Re-walk tracked paths so new files (and files of newly-supported
-      // extensions, e.g. PDF/DOCX added in a later version) are picked up.
-      // For pre-trackedPaths indexes, fall back to refreshing only known files.
-      const files = config.trackedPaths.length
-        ? collectFromTracked(config)
-        : Object.keys(loadIndex().files).filter(f => existsSync(f));
+      let files: string[] = [];
+      if (config.trackedPaths.length) {
+        const scan = collectFromTrackedDetailed(config);
+        if (scan.errors.length) {
+          process.stderr.write(`\r\x1b[2K[rag] Auto-refresh skipped: tracked path unavailable\n`);
+          for (const e of scan.errors.slice(0, 3)) process.stderr.write(`[rag] ${e}\n`);
+        } else {
+          files = scan.files;
+        }
+      } else {
+        files = Object.keys(loadIndex().files).filter(f => existsSync(f));
+      }
       if (files.length) {
         process.stderr.write(`\r\x1b[2K[rag] Index stale, refreshing ${files.length} files…`);
-        await indexFiles(files, undefined, database);
+        try {
+          const refreshResult = await indexFiles(files, undefined, database, false, signal);
+          if (refreshResult.failed > 0) {
+            process.stderr.write(`\r\x1b[2K[rag] Auto-refresh incomplete: ${refreshResult.failed} failed\n`);
+            for (const e of refreshResult.errors.slice(0, 3)) {
+              process.stderr.write(`[rag] ${e}\n`);
+            }
+          }
+        } catch (err) {
+          if (!isAbortError(err)) {
+            process.stderr.write(`\r\x1b[2K[rag] Auto-refresh failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
+        }
         process.stderr.write(`\r\x1b[2K`);
       }
     }
 
-    const results = await retrieve(event.prompt, {
-      limit: config.ragTopK,
-      alpha: config.ragAlpha,
-      db: database,
-      config,
-    });
+    let results;
+    try {
+      results = await retrieve(event.prompt, {
+        limit: config.ragTopK,
+        alpha: config.ragAlpha,
+        db: database,
+        config,
+        signal,
+      });
+    } catch (err) {
+      if (err instanceof IndexIncompatibleError) {
+        process.stderr.write(`\r\x1b[2K[rag] Skipping auto-inject: ${err.reason}\n`);
+        return;
+      }
+      if (isAbortError(err)) return;
+      process.stderr.write(`\r\x1b[2K[rag] Auto-inject retrieve failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      return;
+    }
     const relevant = results.filter(r => r.hybrid >= config.ragScoreThreshold);
     if (!relevant.length) return;
 
     const built = buildContext(relevant, { maxTokens: config.maxContextTokens });
+    if (!built.citationIds.length) return;
     return {
       message: {
         customType: "rag",
@@ -162,6 +229,7 @@ export default function (pi: ExtensionAPI) {
     { value: "ext",      label: "ext",      description: "Manage indexable file-extension allowlist" },
     { value: "on",       label: "on",       description: "Enable auto-injection" },
     { value: "off",      label: "off",      description: "Disable auto-injection" },
+    { value: "config",   label: "config",   description: "Show config issues or reset a broken config.json" },
     { value: "help",     label: "help",     description: "Show all /rag commands" },
   ];
 
@@ -181,9 +249,13 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "index") {
         const path = parts[1] || ".";
         if (!existsSync(path)) { ctx.ui.notify(`Path not found: ${path}`, "error"); return; }
-        // Anchor a project-local store at cwd if there isn't one in scope yet.
         getRagDir({ createIfMissing: true });
-        const config = loadConfig();
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
+        }
         const absPath = resolve(path);
         if (!config.trackedPaths.includes(absPath)) {
           config.trackedPaths.push(absPath);
@@ -225,7 +297,13 @@ export default function (pi: ExtensionAPI) {
         const secs = (result.durationMs / 1000).toFixed(1);
         const ragDir = getRagDir();
         const scope = ragDir === GLOBAL_RAG_DIR() ? "global" : "project";
-        ctx.ui.notify(`✅ Indexed ${result.indexed} files (${result.chunks} chunks) · ${result.skipped} unchanged · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`, "info");
+        const summary = `Indexed ${result.indexed} files (${result.chunks} chunks) · ${result.skipped} unchanged · ${result.failed} failed · ${secs}s · tracking ${config.trackedPaths.length} path(s) · ${scope} store`;
+        if (result.failed > 0) {
+          ctx.ui.notify(summary, "error");
+          for (const e of result.errors.slice(0, 5)) ctx.ui.notify(e, "error");
+        } else {
+          ctx.ui.notify(summary, "info");
+        }
         return;
       }
 
@@ -233,22 +311,47 @@ export default function (pi: ExtensionAPI) {
       if (cmd === "search") {
         const query = parts.slice(1).join(" ");
         if (!query) { ctx.ui.notify("Usage: /rag search <query>", "warning"); return; }
-        const config = loadConfig();
-        const results = await retrieve(query, { limit: 10, alpha: config.ragAlpha, config });
-        if (!results.length) { ctx.ui.notify(`No results for: ${query}`, "warning"); return; }
+        const loaded = loadConfigDetailed();
+        if (loaded.fileStatus === "invalid") {
+          ctx.ui.notify(invalidConfigNotice(loaded.issues), "error");
+          return;
+        }
+        const config = loaded.config;
+        let bundle;
+        try {
+          bundle = await retrieveWithCandidates(query, { limit: 10, alpha: config.ragAlpha, config });
+        } catch (err) {
+          if (err instanceof IndexIncompatibleError) {
+            ctx.ui.notify(err.reason, "warning");
+            return;
+          }
+          ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
+          return;
+        }
+        const results = bundle.hits;
+        if (!results.length) {
+          ctx.ui.notify(
+            bundle.degraded ? `No results for: ${query} (degraded: ${bundle.degraded})` : `No results for: ${query}`,
+            bundle.degraded ? "error" : "warning",
+          );
+          return;
+        }
 
         const th = ctx.ui.theme;
         const hasVectors = getIndexStats().embeddedCount > 0;
+        const degraded = bundle.degraded;
         const lines: string[] = [
           th.bold(th.fg("accent", "🔍 ") + `${results.length} results for "${query}"`) +
             "  " + th.fg("dim", hasVectors ? "hybrid BM25+vector" : "BM25 only"),
           "",
         ];
+        if (degraded) lines.push(th.fg("warning", `degraded: ${degraded}`), "");
         for (const r of results) {
+          const loc = formatSourceLoc(r.chunk);
+          const rerank = r.rerank !== undefined ? ` rerank=${r.rerank.toFixed(2)}` : "";
           lines.push(
-            th.fg("success", basename(r.chunk.file)) +
-            th.fg("muted", `:${r.chunk.lineStart}-${r.chunk.lineEnd}`) +
-            "  " + th.fg("dim", `score=${r.hybrid.toFixed(2)}`)
+            th.fg("success", loc) +
+            "  " + th.fg("dim", `score=${r.hybrid.toFixed(2)}${rerank}`)
           );
           const preview = r.chunk.content.split("\n").slice(0, 3).join("\n");
           lines.push(th.fg("dim", preview.slice(0, 200)));
@@ -260,7 +363,12 @@ export default function (pi: ExtensionAPI) {
 
       // ── on/off toggle ──
       if (cmd === "on" || cmd === "off") {
-        const config = loadConfig();
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
+        }
         config.ragEnabled = cmd === "on";
         saveConfig(config);
         ctx.ui.notify(cmd === "on" ? "RAG auto-injection enabled" : "RAG auto-injection disabled", "info");
@@ -273,16 +381,26 @@ export default function (pi: ExtensionAPI) {
         const rebuildArgs = parts.slice(1);
         const force = rebuildArgs.includes("--force");
 
-        const config = loadConfig();
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
+        }
         const indexedFileSet = new Set(listIndexedFilePaths());
 
           // Walking tracked paths can stall the event loop on large trees
           // (45k+ files). Use the async variant + yield up-front so the user
           // gets immediate feedback before the heavy work begins.
           ctx.ui.notify("Scanning tracked paths...", "info");
-          const trackedFiles = await collectFromTrackedAsync(config);
+          const scan = await collectFromTrackedDetailedAsync(config);
+          if (scan.errors.length) {
+            ctx.ui.notify("Tracked path unavailable; refusing to drop indexed files or publish a replacement index.", "error");
+            for (const e of scan.errors.slice(0, 8)) ctx.ui.notify(e, "error");
+            return;
+          }
+          const trackedFiles = scan.files;
 
-          // Union of currently-indexed files and files discovered by walking tracked paths.
           const targetSet = new Set<string>([...trackedFiles]);
           for (const f of indexedFileSet) {
             if (existsSync(f) && !isExcludedByConfig(f, config.trackedPaths, config.excludePatterns)) {
@@ -296,19 +414,10 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          // Files in the index but no longer present (deleted, excluded, or untracked).
           const droppedFiles = [...indexedFileSet].filter(f => !targetSet.has(f));
-          for (const f of droppedFiles) pruneIndexedFile(f);
-          // --force bypasses the hash skip inside indexFiles. Do not wipe the
-          // live index first: each file is replaced in a transaction after
-          // embeddings validate, so a failed rebuild keeps the old rows.
-          if (!force) {
-            for (const f of targetFiles) markFileUnembedded(f);
-          }
-
           const newFiles = targetFiles.filter(f => !indexedFileSet.has(f));
           ctx.ui.notify(`Rebuilding ${targetFiles.length} files${force ? " (forced)" : ""}...`, "info");
-          if (droppedFiles.length) ctx.ui.notify(`Pruned ${droppedFiles.length} files (deleted/excluded)`, "info");
+          if (droppedFiles.length) ctx.ui.notify(`${droppedFiles.length} files will be dropped if rebuild succeeds`, "info");
           if (newFiles.length) ctx.ui.notify(`Discovered ${newFiles.length} new files`, "info");
 
           // Yield so the TUI can paint the "Rebuilding" message before
@@ -346,23 +455,43 @@ export default function (pi: ExtensionAPI) {
             onSave() {
               ctx.ui.setStatus("rag", `■ Saving index...`);
             },
-          }, force);
+          }, force, droppedFiles);
 
           ctx.ui.setStatus("rag", undefined);
           ctx.ui.setWidget("rag", undefined);
 
           const secs = (result.durationMs / 1000).toFixed(1);
-          ctx.ui.notify(`✅ Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${droppedFiles.length} deleted · ${result.chunks} chunks · ${secs}s`, "info");
+          const summary = `Rebuilt: ${result.indexed} re-indexed · ${result.skipped} unchanged · ${result.failed === 0 ? droppedFiles.length : 0} deleted · ${result.chunks} chunks · ${result.failed} failed · ${secs}s`;
+          if (result.failed > 0) {
+            ctx.ui.notify(summary, "error");
+            for (const e of result.errors.slice(0, 5)) ctx.ui.notify(e, "error");
+          } else {
+            ctx.ui.notify(summary, "info");
+          }
         return;
       }
 
       // ── refresh (on-demand equivalent of the 24h auto-refresh) ──
       if (cmd === "refresh") {
-        const config = loadConfig();
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
+        }
         const index = loadIndex();
-        const files = config.trackedPaths.length
-          ? collectFromTracked(config)
-          : Object.keys(index.files).filter(f => existsSync(f));
+        let files: string[];
+        if (config.trackedPaths.length) {
+          const scan = collectFromTrackedDetailed(config);
+          if (scan.errors.length) {
+            ctx.ui.notify("Tracked path unavailable; refusing to refresh.", "error");
+            for (const e of scan.errors.slice(0, 8)) ctx.ui.notify(e, "error");
+            return;
+          }
+          files = scan.files;
+        } else {
+          files = Object.keys(index.files).filter(f => existsSync(f));
+        }
         if (!files.length) {
           ctx.ui.notify("No tracked files to refresh. Run /rag index <path> first.", "warning");
           return;
@@ -398,16 +527,21 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setWidget("rag", undefined);
 
         const secs = (result.durationMs / 1000).toFixed(1);
-        ctx.ui.notify(`✅ Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks · ${secs}s`, "info");
+        const summary = `Refreshed ${result.indexed} new/changed · ${result.skipped} unchanged · ${result.chunks} chunks · ${result.failed} failed · ${secs}s`;
+        if (result.failed > 0) {
+          ctx.ui.notify(summary, "error");
+          for (const e of result.errors.slice(0, 5)) ctx.ui.notify(e, "error");
+        } else {
+          ctx.ui.notify(summary, "info");
+        }
         return;
       }
 
       // ── ext (configure file extensions) ──
       if (cmd === "ext") {
         const sub = (parts[1] || "list").toLowerCase();
-        const config = loadConfig();
-
         if (sub === "list") {
+          const config = loadConfigDetailed().config;
           const th = ctx.ui.theme;
           const active = Array.from(resolveExtensions(config)).sort();
           const lines: string[] = [
@@ -421,6 +555,13 @@ export default function (pi: ExtensionAPI) {
           lines.push("", th.fg("dim", "Edit via /rag ext add <.ext> / remove <.ext> / reset"));
           ctx.ui.setWidget("rag-ext", lines);
           return;
+        }
+
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
         }
 
         if (sub === "add") {
@@ -465,11 +606,11 @@ export default function (pi: ExtensionAPI) {
 
       // ── exclude ──
       if (cmd === "exclude") {
-        const config = loadConfig();
         const expr = parts.slice(1).join(" ").trim();
         const th = ctx.ui.theme;
 
         if (!expr) {
+          const config = loadConfigDetailed().config;
           if (!config.excludePatterns.length) {
             ctx.ui.notify("No exclude patterns set. Add one with: /rag exclude <pattern>", "info");
             return;
@@ -481,6 +622,13 @@ export default function (pi: ExtensionAPI) {
           for (const p of config.excludePatterns) lines.push("  " + th.fg("muted", p));
           ctx.ui.setWidget("rag-exclude", lines);
           return;
+        }
+
+        let config: ReturnType<typeof loadConfig>;
+        try { config = requireWritableConfig(); }
+        catch (err) {
+          if (err instanceof ConfigFileInvalidError) { ctx.ui.notify(invalidConfigNotice(err.issues), "error"); return; }
+          throw err;
         }
 
         if (expr.startsWith("-")) {
@@ -555,6 +703,7 @@ export default function (pi: ExtensionAPI) {
           ["/rag ext list|add|remove|reset", "Manage the indexable file-extension allowlist"],
           ["/rag on",                 "Enable automatic RAG injection before each agent turn"],
           ["/rag off",                "Disable automatic RAG injection"],
+          ["/rag config reset",       "Back up a broken config.json and write defaults"],
           ["/rag help",               "Show this help"],
         ];
         const COL = 36;
@@ -564,6 +713,31 @@ export default function (pi: ExtensionAPI) {
           lines.push("  " + th.fg("success", pad(usage, COL)) + "  " + th.fg("dim", desc));
         }
         ctx.ui.setWidget("rag-help", lines);
+        return;
+      }
+
+      // ── config ──
+      if (cmd === "config") {
+        const sub = (parts[1] || "status").toLowerCase();
+        if (sub === "reset") {
+          const backup = resetBrokenConfig();
+          ctx.ui.notify(backup ? `Wrote defaults. Broken file kept at ${backup}` : "Wrote default config.json", "info");
+          return;
+        }
+        const loaded = loadConfigDetailed();
+        const th = ctx.ui.theme;
+        const lines = [
+          th.bold("RAG config"),
+          "",
+          "  file: " + (loaded.fileStatus === "ok" ? th.fg("success", loaded.fileStatus) : th.fg("warning", loaded.fileStatus)),
+        ];
+        if (loaded.issues.length) {
+          for (const issue of loaded.issues) lines.push("  " + th.fg("warning", issue));
+          lines.push("", th.fg("dim", "Repair config.json or run /rag config reset"));
+        } else {
+          lines.push("  " + th.fg("success", "no issues"));
+        }
+        ctx.ui.setWidget("rag-config", lines);
         return;
       }
 
@@ -600,6 +774,16 @@ export default function (pi: ExtensionAPI) {
           (config.ragEnabled ? th.fg("success", "enabled") : th.fg("warning", "disabled")) +
           th.fg("dim", `  topK=${config.ragTopK}  threshold=${config.ragScoreThreshold}  alpha=${config.ragAlpha}`),
       ];
+      const cfgLoad = loadConfigDetailed();
+      if (cfgLoad.fileStatus === "invalid" || cfgLoad.issues.length) {
+        lines.push("", "  " + th.bold(th.fg("warning", "Config issues:")));
+        if (cfgLoad.fileStatus === "invalid") {
+          lines.push("    " + th.fg("warning", "config.json is invalid — using defaults. Repair the file or /rag clear config by rewriting it."));
+        }
+        for (const issue of cfgLoad.issues.slice(0, 8)) {
+          lines.push("    " + th.fg("warning", issue));
+        }
+      }
 
       if (fileCount) {
         lines.push("", "  " + th.bold("File types:"));
@@ -637,11 +821,17 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       path: Type.String({ description: "File or directory path to index" }),
     }),
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, signal) => {
       if (!existsSync(params.path)) return { content: [{ type: "text" as const, text: `Path not found: ${params.path}` }], details: undefined };
-      // Anchor a project-local store at cwd if there isn't one in scope yet.
       getRagDir({ createIfMissing: true });
-      const config = loadConfig();
+      let config: ReturnType<typeof loadConfig>;
+      try { config = requireWritableConfig(); }
+      catch (err) {
+        if (err instanceof ConfigFileInvalidError) {
+          return { content: [{ type: "text" as const, text: invalidConfigNotice(err.issues) }], details: undefined };
+        }
+        throw err;
+      }
       const absPath = resolve(params.path);
       if (!config.trackedPaths.includes(absPath)) {
         config.trackedPaths.push(absPath);
@@ -649,9 +839,11 @@ export default function (pi: ExtensionAPI) {
       }
       const files = collectFiles(absPath, undefined, config.excludePatterns);
       if (!files.length) return { content: [{ type: "text" as const, text: `No indexable files found in: ${params.path}` }], details: undefined };
-      const result = await indexFiles(files, {});
+      const result = await indexFiles(files, {}, undefined, false, signal);
       process.stderr.write(`\n`);
-      return { content: [{ type: "text" as const, text: `Indexed ${result.indexed} files (${result.chunks} chunks, embeddings generated). ${result.skipped} unchanged. ${(result.durationMs / 1000).toFixed(1)}s` }], details: undefined };
+      const text = `Indexed ${result.indexed} files (${result.chunks} chunks). ${result.skipped} unchanged. ${result.failed} failed. ${(result.durationMs / 1000).toFixed(1)}s`
+        + (result.errors.length ? `\n${result.errors.slice(0, 8).join("\n")}` : "");
+      return { content: [{ type: "text" as const, text }], details: undefined };
     },
   });
 
@@ -661,21 +853,59 @@ export default function (pi: ExtensionAPI) {
     description: "Search the local pi-local-rag index using hybrid BM25+vector search. Returns relevant chunks with file paths, line numbers, and relevance scores.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Max results (default 10, max 50)" })),
     }),
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, signal) => {
       const stats = getIndexStats();
       if (!stats.totalChunks) return { content: [{ type: "text" as const, text: "pi-local-rag index is empty. Run rag_index first." }], details: undefined };
-      const config = loadConfig();
-      const results = await retrieve(params.query, { limit: params.limit ?? 10, alpha: config.ragAlpha, config });
-      if (!results.length) return { content: [{ type: "text" as const, text: `No results for: ${params.query}` }], details: undefined };
-      const text = JSON.stringify(results.map(r => ({
+      const loaded = loadConfigDetailed();
+      if (loaded.fileStatus === "invalid") {
+        return { content: [{ type: "text" as const, text: invalidConfigNotice(loaded.issues) }], details: undefined };
+      }
+      const config = loaded.config;
+      const rawLimit = params.limit ?? 10;
+      const limit = Number.isInteger(rawLimit) && rawLimit >= 1 ? Math.min(50, rawLimit) : 10;
+      let bundle;
+      try {
+        bundle = await retrieveWithCandidates(params.query, { limit, alpha: config.ragAlpha, config, signal });
+      } catch (err) {
+        if (err instanceof IndexIncompatibleError) {
+          return { content: [{ type: "text" as const, text: err.reason }], details: undefined };
+        }
+        throw err;
+      }
+      const results = bundle.hits;
+      if (!results.length) {
+        const extra = bundle.degraded ? `\ndegraded: ${bundle.degraded}\nmethod: ${bundle.method}` : "";
+        return { content: [{ type: "text" as const, text: `No results for: ${params.query}${extra}` }], details: undefined };
+      }
+      const payload = results.map(r => ({
+        id: r.chunk.id,
         file: r.chunk.file,
-        lines: `${r.chunk.lineStart}-${r.chunk.lineEnd}`,
+        location: formatSourceLoc(r.chunk),
+        pageStart: r.chunk.pageStart ?? null,
+        pageEnd: r.chunk.pageEnd ?? null,
+        section: r.chunk.section ?? null,
+        chunkIndex: r.chunk.chunkIndex ?? null,
+        lines: r.chunk.lineStart >= 1 ? `${r.chunk.lineStart}-${r.chunk.lineEnd}` : null,
         tokens: r.chunk.tokens,
-        scores: { bm25: r.bm25.toFixed(3), vector: r.vector.toFixed(3), hybrid: r.hybrid.toFixed(3) },
+        scores: {
+          bm25: r.bm25.toFixed(3),
+          vector: r.vector.toFixed(3),
+          hybrid: r.hybrid.toFixed(3),
+          rerank: r.rerank !== undefined ? r.rerank.toFixed(3) : null,
+        },
+        degraded: r.degraded ?? bundle.degraded ?? null,
         preview: r.chunk.content.slice(0, 300),
-      })), null, 2);
+      }));
+      const text = loaded.issues.length || bundle.degraded
+        ? JSON.stringify({
+            configIssues: loaded.issues,
+            degraded: bundle.degraded ?? null,
+            method: bundle.method,
+            results: payload,
+          }, null, 2)
+        : JSON.stringify(payload, null, 2);
       return { content: [{ type: "text" as const, text }], details: undefined };
     },
   });
@@ -703,6 +933,8 @@ export default function (pi: ExtensionAPI) {
         totalTokens: stats.totalTokens,
         lastBuild: stats.lastBuild || "never",
         ragConfig: config,
+        configIssues: loadConfigDetailed().issues,
+        configFileStatus: loadConfigDetailed().fileStatus,
         storagePath: getRagDir(),
         storageScope: getRagDir() === GLOBAL_RAG_DIR() ? "global" : "project",
       }, null, 2);

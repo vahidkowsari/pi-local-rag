@@ -48,6 +48,7 @@ import {
   resolveExtensions,
   collectFiles,
   collectFromTracked,
+  collectFromTrackedDetailed,
   isExcludedByConfig,
   extractText,
   hybridSearch,
@@ -55,6 +56,8 @@ import {
   initSchema,
   getOcrTooling,
   isSparsePdfText,
+  stampFingerprints,
+  defaultConfig,
 } from "../index.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -70,6 +73,7 @@ function createTestDb(chunks: Array<{
   db.pragma("journal_mode = WAL");
   loadVec(db);
   initSchema(db);
+  stampFingerprints(db, defaultConfig());
 
   const insChunk = db.prepare(`
     INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)
@@ -417,6 +421,26 @@ describe("collectFromTracked", () => {
         excludePatterns: [],
       };
       expect(collectFromTracked(cfg).length).toBe(1);
+    } finally {
+      rmSync(a, { recursive: true, force: true });
+    }
+  });
+
+  it("reports unavailable tracked roots separately from a successful empty scan", () => {
+    const a = mkdtempSync(join(tmpdir(), "rag-track-a-"));
+    try {
+      writeFileSync(join(a, "x.ts"), "x");
+      const missing = "/definitely/not/a/real/dir-xyz-123";
+      const cfg = {
+        ragEnabled: true, ragTopK: 5, ragScoreThreshold: 0.1, ragAlpha: 0.4,
+        extraExtensions: [], excludeExtensions: [],
+        trackedPaths: [a, missing],
+        excludePatterns: [],
+      };
+      const scan = collectFromTrackedDetailed(cfg);
+      expect(scan.files.length).toBe(1);
+      expect(scan.unavailableRoots).toContain(missing);
+      expect(scan.errors.some(e => e.includes("does not exist"))).toBe(true);
     } finally {
       rmSync(a, { recursive: true, force: true });
     }
@@ -1004,7 +1028,8 @@ describe("/rag find glob matching", () => {
 describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => {
   let ragDir: string;
   let legacyDir: string;
-  // Bound at beforeAll-time via fresh module import.
+  let savedRagDir: string | undefined;
+  let savedLegacyDir: string | undefined;
   let loadConfig: typeof import("../index.ts").loadConfig;
   let saveConfig: typeof import("../index.ts").saveConfig;
   let loadIndex: typeof import("../index.ts").loadIndex;
@@ -1014,6 +1039,8 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
   beforeAll(async () => {
     ragDir = mkdtempSync(join(tmpdir(), "pi-rag-storage-"));
     legacyDir = mkdtempSync(join(tmpdir(), "pi-lens-legacy-"));
+    savedRagDir = process.env.PI_RAG_DIR;
+    savedLegacyDir = process.env.PI_RAG_LEGACY_DIR;
     process.env.PI_RAG_DIR = ragDir;
     process.env.PI_RAG_LEGACY_DIR = legacyDir;
     rmSync(ragDir, { recursive: true, force: true });
@@ -1027,8 +1054,10 @@ describe("Storage (loadConfig/saveConfig/loadIndex/saveIndex/ensureDir)", () => 
   afterAll(() => {
     rmSync(ragDir, { recursive: true, force: true });
     rmSync(legacyDir, { recursive: true, force: true });
-    delete process.env.PI_RAG_DIR;
-    delete process.env.PI_RAG_LEGACY_DIR;
+    if (savedRagDir !== undefined) process.env.PI_RAG_DIR = savedRagDir;
+    else delete process.env.PI_RAG_DIR;
+    if (savedLegacyDir !== undefined) process.env.PI_RAG_LEGACY_DIR = savedLegacyDir;
+    else delete process.env.PI_RAG_LEGACY_DIR;
   });
 
   it("loadConfig: returns defaults when no config file exists", () => {
@@ -1386,7 +1415,8 @@ describe("before_agent_start: 24h auto-refresh", () => {
         provider: "local", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384, contract: "l2-unit-v1",
       }));
       db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('processing_fingerprint', ?)").run(JSON.stringify({
-        parser: "blocks-v1", chunker: "token-v1", maxLines: 50,
+        parser: "blocks-v1", chunker: "token-v3", maxLines: 50,
+        targetTokens: 180, maxTokens: 240, overlapTokens: 30,
       }));
       db.prepare("INSERT OR REPLACE INTO metadata(key, value) VALUES ('embedding_dimensions', ?)").run("384");
     } finally {
@@ -1464,9 +1494,20 @@ describe("before_agent_start: 24h auto-refresh", () => {
 // pattern, adapted for TypeScript.
 describe("getFreshDbConn: [Symbol.dispose] for `using` declaration", () => {
   let mod: typeof import("../index.ts");
+  let ragDir: string;
+  let savedRagDir: string | undefined;
 
   beforeAll(async () => {
+    ragDir = mkdtempSync(join(tmpdir(), "pi-rag-dispose-"));
+    savedRagDir = process.env.PI_RAG_DIR;
+    process.env.PI_RAG_DIR = ragDir;
     mod = await import("../index.ts");
+  });
+
+  afterAll(() => {
+    rmSync(ragDir, { recursive: true, force: true });
+    if (savedRagDir !== undefined) process.env.PI_RAG_DIR = savedRagDir;
+    else delete process.env.PI_RAG_DIR;
   });
 
   it("attaches [Symbol.dispose] to the returned connection", () => {

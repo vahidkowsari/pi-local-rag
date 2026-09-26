@@ -20,6 +20,7 @@ import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import {
   embed, cosineSimilarity, hybridSearch, sha256, initSchema,
+  stampFingerprints, defaultConfig,
 } from "../index.ts";
 
 const skip = process.env.SKIP_EMBEDDING_TESTS === "1";
@@ -75,6 +76,7 @@ describe("embed (real ONNX)", () => {
     db.pragma("journal_mode = WAL");
     loadVec(db);
     initSchema(db);
+    stampFingerprints(db, defaultConfig());
 
     const insChunk = db.prepare(`
       INSERT INTO chunks(id, file_path, chunk_content, line_start, line_end, chunk_hash, indexed_at, tokens)

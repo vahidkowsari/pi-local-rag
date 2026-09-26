@@ -12,27 +12,30 @@ Plan: cloud research RAG (A1–E4). Branch: `feat/cloud-research-rag`. Not pushe
   - `693de2f` A3 — replace index rows only after embeddings validate
   - `b46aa8c` B1–B3 — local/Voyage embedding providers and config factory
   - `4ab0291` C1–C2 — fingerprints, dynamic dimensions, active manifest
-  - (this commit) D1–E4 — retrieval, reranker, context, parsing, eval
+  - `d546804` D1–E4 — retrieval, reranker, context, parsing, eval template
+- (this work) Astra review R1–R16 follow-up on the same branch
 
 ## 2. A1–E4 status
 
+Status after the 2026-09-21 Astra review and the follow-up fixes in this tree. “Done” means the code path exists and is covered by offline tests. “Unverified” means a live service or a human paper check was not run.
+
 | Step | Status | Notes |
 | --- | --- | --- |
-| A1 | done | Call shapes, connection ownership, `repository.ts` in pack, handler tests |
+| A1 | done | Call shapes, connection ownership, pack includes runtime modules including `abort.ts` |
 | A2 | done | `bm25ToRelevance`; frozen ranking fixtures |
-| A3 | done | Per-file transactional replace; force-rebuild no longer wipes first |
-| B1 | done | `LocalEmbeddingProvider`; `embed.ts` facade |
-| B2 | done | Nested config, `PI_RAG_*` env, factory |
-| B3 | done | Voyage embed HTTP mocks + `npm run smoke:voyage-embed` |
-| C1 | done | Fingerprints, `indexes/<id>/rag.db`, `active.json` |
-| C2 | done | Index/query use matching provider; `rag_status` shows rebuild reason |
+| A3 | done | Per-file transactional replace; command-level force rebuild now stages |
+| B1 | done | `LocalEmbeddingProvider`; production queries reuse the cached pipeline |
+| B2 | done | Nested config; broken JSON / illegal env / model-dim pairing are reported |
+| B3 | done | Voyage embed HTTP mocks; smoke starts without a key (`UNVERIFIED`) |
+| C1 | done (offline) | Unique staging generation; empty schema dim check; parse/embed failure does not publish |
+| C2 | done (offline) | Query, index, and auto-inject share compatibility; cloud auto-refresh is off by default |
 | D1 | done | `retrieve()`; NoneReranker identity slice |
-| D2 | done | Voyage rerank mock tests; degrade to hybrid on failure |
-| D3 | done | `buildContext` with estimated token budget; auto-inject uses it |
-| E1 | done | `extractBlocks` with 1-based PDF pages; markdown pages stay null |
-| E2 | done | `chunkBlocks` token-aware; MiniLM budget 180/240/30 |
-| E3 | done | `page_start`/`page_end`/`section`/`chunk_index` columns |
-| E4 | done | `eval/questions.json` (20 items) + `npm run eval:retrieval` |
+| D2 | done (offline) | Voyage rerank `truncation:false` + token caps; config errors are visible; request failure degrades |
+| D3 | done (offline) | Context budget has 10% slack; empty header-only inject is skipped; deadline on auto-inject |
+| E1 | partial | Physical PDF pages at extract time; 3-page generated-PDF spot-check still unverified |
+| E2 | partial | Estimate-based `maxTokens` is enforced after overlap join; CJK-aware estimate. Not a MiniLM tokenizer hard cap |
+| E3 | done (offline) | page/section/id/chunkIndex flow to context, search, and `rag_query`; unknown lines omitted |
+| E4 | partial | Four groups are selectable (`--groups=`). local-bm25 runs; local-hybrid skips when `SKIP_EMBEDDING_TESTS=1`; cloud groups execute when `VOYAGE_API_KEY` is set. Candidate recall uses k=30; sourceAccuracy scores page separately from content |
 
 ## 3. Module roles
 
@@ -44,7 +47,7 @@ Plan: cloud research RAG (A1–E4). Branch: `feat/cloud-research-rag`. Not pushe
 - `parsing.ts` — structured blocks with PDF pages
 - `chunking.ts` — `chunkBlocks` plus legacy `chunkText`
 
-Decisions: Voyage embed default `voyage-4-lite` / 1024-d / float; rerank default `rerank-2.5-lite` (GA, lower latency than `rerank-2.5`). Token counts for chunking and Pi context are character/4 **estimates**.
+Decisions: Voyage embed default `voyage-4-lite` / 1024-d / float; rerank default `rerank-2.5-lite` (GA, lower latency than `rerank-2.5`). Chunking uses a CJK-aware estimate (CJK ≈ 1 token/char, other ≈ 4 chars/token) plus MiniLM 180/240/30 bounds. Pi context uses the same estimate with 10% slack. These are still estimates, not a model tokenizer.
 
 ## 4. Config
 
@@ -52,7 +55,7 @@ Default remains `embedding.provider=local`, `reranker.provider=none`. Nested def
 
 ## 5. Index switch
 
-Unfingerprinted non-empty DBs require `/rag rebuild --force`. Model/dimension changes build `indexes/<id>/rag.db` and publish `active.json` only after a successful staging build. Legacy `rag.db` is not deleted. Failed force rebuild keeps the previous active index.
+Unfingerprinted non-empty DBs require `/rag rebuild --force`. Queries on those indexes do not assume the local MiniLM contract. Full rebuilds (`--force` or incompatible) write a unique `staging/<generation>/` tree and publish to `indexes/<indexId>/<generation>/` only after parse+embed succeed and vector coverage matches. Previous generations are not deleted. Incremental non-force rebuilds stay in-place and prune dropped files only after a clean result.
 
 ## 6. Offline tests
 
@@ -64,20 +67,20 @@ npm pack --dry-run --ignore-scripts --json
 
 - TypeScript **5.7.3** (locked in `devDependencies`)
 - Node v22.23.2
-- Last run: **161 passed, 4 skipped** (real ONNX, `SKIP_EMBEDDING_TESTS=1`)
+- Last run: **194 passed, 4 skipped** (real ONNX, `SKIP_EMBEDDING_TESTS=1`)
 
 ## 7. Live services
 
 | Path | Status |
 | --- | --- |
 | Real ONNX MiniLM | skipped (`SKIP_EMBEDDING_TESTS=1`) |
-| Voyage embedding | **unverified** (no key); smoke: `npm run smoke:voyage-embed` |
-| Voyage rerank | **unverified** (no key); smoke: `npm run smoke:voyage-rerank` |
+| Voyage embedding | **unverified** (no key); smoke starts and prints `UNVERIFIED` |
+| Voyage rerank | **unverified** (no key); smoke starts and prints `UNVERIFIED` |
 | Pi tool + auto-inject | handler tests with a fake Pi API; no live Pi session |
 
 ## 8. Evaluation
 
-`eval/questions.json` has 20 fixed items (abbrev, synonym-ish, unanswerable). `npm run eval:retrieval` writes `eval/runs/` with metric **definitions** and `not-run` cloud columns. No simulated scores.
+`eval/questions.json` has 23 items (including Chinese queries and a page-labeled sample PDF). `npm run eval:retrieval` indexes a local corpus and computes recall / hit@5 / MRR / unanswerable on **BM25-only**. Those numbers are pipeline metrics, not MiniLM or Voyage quality. Cloud embedding and rerank groups stay `not-run` without `VOYAGE_API_KEY`.
 
 ## 9. Known limits
 

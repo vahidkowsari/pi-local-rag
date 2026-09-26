@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
-import { getRagDir, dbFile, indexDbFile, activeManifestFile, ensureDir } from "./store.ts";
+import { getRagDir, dbFile, activeManifestFile, ensureDir } from "./store.ts";
 import * as repo from "./repository.ts";
 import type { RagConfig } from "./config.ts";
 import {
   embeddingFingerprintFromConfig,
+  embeddingFingerprintsEqual,
   fingerprintsEqual,
   indexIdFor,
   parseEmbeddingFingerprint,
@@ -28,6 +30,20 @@ export interface ActiveManifest {
 export type CompatResult =
   | { ok: true; embedding: EmbeddingFingerprint; processing: ProcessingFingerprint; empty: boolean }
   | { ok: false; needsRebuild: true; reason: string };
+
+export class IndexIncompatibleError extends Error {
+  readonly needsRebuild = true;
+  readonly reason: string;
+  constructor(reason: string) {
+    super(reason);
+    this.name = "IndexIncompatibleError";
+    this.reason = reason;
+  }
+}
+
+export function newGeneration(): string {
+  return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+}
 
 let writeChain: Promise<unknown> = Promise.resolve();
 
@@ -74,7 +90,22 @@ export function checkIndexCompatibility(db: Database.Database, config: RagConfig
   const storedProc = parseProcessingFingerprint(repo.getMetadata(db, repo.MetadataKey.ProcessingFingerprint));
   const tableDim = repo.detectVectorDimensions(db);
 
+  if (tableDim !== undefined && tableDim !== desiredEmb.dimensions) {
+    return {
+      ok: false, needsRebuild: true,
+      reason: `Vector table dimension ${tableDim} does not match requested ${desiredEmb.dimensions}. Rebuild required.`,
+    };
+  }
   if (chunks === 0) {
+    if (storedEmb && !embeddingFingerprintsEqual(storedEmb, desiredEmb)) {
+      return {
+        ok: false, needsRebuild: true,
+        reason: `Index embedding contract is ${storedEmb.provider}/${storedEmb.model}/${storedEmb.dimensions}; config requests ${desiredEmb.provider}/${desiredEmb.model}/${desiredEmb.dimensions}. Rebuild required.`,
+      };
+    }
+    if (storedProc && !fingerprintsEqual(storedProc, desiredProc)) {
+      return { ok: false, needsRebuild: true, reason: "Document processing fingerprint changed (parser/chunker). Rebuild required; file hashes from the old processor will not be reused." };
+    }
     return { ok: true, embedding: desiredEmb, processing: desiredProc, empty: true };
   }
   if (!storedEmb || !storedProc) {
@@ -83,7 +114,7 @@ export function checkIndexCompatibility(db: Database.Database, config: RagConfig
   if (tableDim !== undefined && tableDim !== storedEmb.dimensions) {
     return { ok: false, needsRebuild: true, reason: `Vector table dimension ${tableDim} does not match fingerprint ${storedEmb.dimensions}.` };
   }
-  if (!fingerprintsEqual(storedEmb, desiredEmb)) {
+  if (!embeddingFingerprintsEqual(storedEmb, desiredEmb)) {
     return { ok: false, needsRebuild: true, reason: `Index embedding contract is ${storedEmb.provider}/${storedEmb.model}/${storedEmb.dimensions}; config requests ${desiredEmb.provider}/${desiredEmb.model}/${desiredEmb.dimensions}. Rebuild required.` };
   }
   if (!fingerprintsEqual(storedProc, desiredProc)) {
@@ -101,26 +132,55 @@ export function stampFingerprints(db: Database.Database, config: RagConfig): voi
   repo.setMetadata(db, repo.MetadataKey.EmbeddingModel, emb.model);
 }
 
-export function stagingDbPath(config: RagConfig, ragDir = getRagDir()): { indexId: string; dbPath: string; relativeDbPath: string } {
+export interface StagingSpec {
+  indexId: string;
+  generation: string;
+  dbPath: string;
+  relativeDbPath: string;
+}
+
+export function stagingDbPath(config: RagConfig, ragDir = getRagDir(), generation = newGeneration()): StagingSpec {
   const emb = embeddingFingerprintFromConfig(config.embedding);
   const proc = processingFingerprintFromConfig(config);
   const indexId = indexIdFor(emb, proc);
-  const dbPath = indexDbFile(ragDir, indexId);
-  return { indexId, dbPath, relativeDbPath: join("indexes", indexId, "rag.db") };
+  const relativeDbPath = join("staging", generation, "rag.db");
+  return { indexId, generation, dbPath: join(ragDir, relativeDbPath), relativeDbPath };
 }
 
-export function prepareStagingDir(config: RagConfig, ragDir = getRagDir()): { indexId: string; dbPath: string; relativeDbPath: string } {
+/**
+ * Create a unique unpublished staging directory. Never deletes a published
+ * index — previous generations stay on disk until the user removes them.
+ */
+export function prepareStagingDir(config: RagConfig, ragDir = getRagDir()): StagingSpec {
   const spec = stagingDbPath(config, ragDir);
-  const active = readActiveManifest(ragDir);
-  if (active?.indexId === spec.indexId) {
-    // Same contract as the live index: callers should rebuild in place, not stage.
-    return spec;
-  }
-  if (existsSync(spec.dbPath)) {
-    rmSync(dirname(spec.dbPath), { recursive: true, force: true });
-  }
   mkdirSync(dirname(spec.dbPath), { recursive: true });
   return spec;
+}
+
+/** Move a finished staging tree into indexes/ and point active.json at it. */
+export function finalizeStaging(
+  ragDir: string,
+  spec: StagingSpec,
+  config: RagConfig,
+): ActiveManifest {
+  const destRelDir = join("indexes", spec.indexId, spec.generation);
+  const destDir = join(ragDir, destRelDir);
+  mkdirSync(join(ragDir, "indexes", spec.indexId), { recursive: true });
+  const stagingDir = dirname(spec.dbPath);
+  if (existsSync(destDir)) {
+    throw new Error(`Refusing to overwrite existing index generation at ${destDir}`);
+  }
+  renameSync(stagingDir, destDir);
+  const manifest: ActiveManifest = {
+    version: 1,
+    indexId: spec.indexId,
+    relativeDbPath: join(destRelDir, "rag.db"),
+    embeddingFingerprint: serializeFingerprint(embeddingFingerprintFromConfig(config.embedding)),
+    processingFingerprint: serializeFingerprint(processingFingerprintFromConfig(config)),
+    createdAt: new Date().toISOString(),
+  };
+  publishActiveManifest(ragDir, manifest);
+  return manifest;
 }
 
 export function checkpointAndClose(db: Database.Database): void {

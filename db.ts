@@ -21,6 +21,7 @@ export interface Chunk {
   pageStart?: number | null;
   pageEnd?: number | null;
   section?: string | null;
+  chunkIndex?: number;
 }
 
 interface FileEntry {

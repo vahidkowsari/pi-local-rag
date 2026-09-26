@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "providers": {
+    "local": {
+      "type": "transformers",
+      "models": {
+        "embedding": {
+          "Xenova/all-MiniLM-L6-v2": {
+            "dimensions": 384
+          }
+        }
+      }
+    },
+    "voyage": {
+      "type": "voyage",
+      "baseUrl": "https://api.voyageai.com/v1",
+      "auth": {
+        "type": "bearer",
+        "env": "VOYAGE_API_KEY"
+      },
+      "models": {
+        "embedding": {
+          "voyage-4-lite": {
+            "dimensions": 1024
+          },
+          "voyage-4": {
+            "dimensions": 1024
+          }
+        },
+        "rerank": {
+          "rerank-3-lite": {},
+          "rerank-2.5-lite": {},
+          "rerank-2.5": {}
+        }
+      }
+    },
+    "none": {
+      "type": "noop",
+      "models": {
+        "rerank": {
+          "none": {},
+          "rerank-2.5-lite": {}
+        }
+      }
+    }
+  }
+}

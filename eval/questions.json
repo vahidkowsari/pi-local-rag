@@ -18,5 +18,8 @@
   {"id": "q17", "query": "VOYAGE_API_KEY environment", "acceptable": [{"file": "config.ts", "snippet": "VOYAGE_API_KEY"}]},
   {"id": "q18", "query": "rebuild --force keeps old index on failure", "acceptable": [{"file": "indexing.ts", "snippet": "rebuildWithSwitch"}]},
   {"id": "q19", "query": "abbreviation RAG", "acceptable": [{"file": "README.md", "snippet": "RAG"}]},
-  {"id": "q20", "query": "What is the capital of Atlantis in this repository?", "acceptable": [], "unanswerable": true}
+  {"id": "q20", "query": "What is the capital of Atlantis in this repository?", "acceptable": [], "unanswerable": true},
+  {"id": "q21", "query": "混合检索如何把 BM25 和向量分数融合成 hybrid？", "acceptable": [{"file": "search.ts", "snippet": "hybrid"}]},
+  {"id": "q22", "query": "cloudAutoRefresh 默认是否开启？", "acceptable": [{"file": "config.ts", "snippet": "cloudAutoRefresh"}]},
+  {"id": "q23", "query": "What marker is on page 1 of the sample PDF?", "acceptable": [{"file": "sample.pdf", "page": 1, "snippet": "RagPdfMarker"}]}
 ]

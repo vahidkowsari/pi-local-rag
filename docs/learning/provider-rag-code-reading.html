@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="pi-local-rag 云端 Provider 配置化改造的源码阅读课">
+  <title>云端 Provider 代码阅读课 · pi-local-rag</title>
+  <style>
+    :root {
+      --ink: #17263d;
+      --ink-soft: #53647b;
+      --paper: #f5f8fc;
+      --surface: #ffffff;
+      --surface-blue: #eaf1ff;
+      --line: #d8e1ee;
+      --blue: #2d5bc7;
+      --blue-dark: #1d3f91;
+      --teal: #087f8c;
+      --amber: #a76313;
+      --code: #111c2e;
+      --code-ink: #dce8fb;
+      --shadow: 0 12px 32px rgba(30, 58, 101, .08);
+      --radius: 10px;
+      --measure: 78ch;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "Avenir Next", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.78;
+      text-rendering: optimizeLegibility;
+    }
+    a { color: var(--blue-dark); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { color: var(--blue); }
+    :focus-visible { outline: 3px solid #efaa35; outline-offset: 3px; border-radius: 4px; }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      min-height: 58px;
+      padding: 10px 28px;
+      color: #fff;
+      background: rgba(23, 38, 61, .97);
+      border-bottom: 1px solid rgba(255,255,255,.12);
+      backdrop-filter: blur(12px);
+    }
+    .brand { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+    .brand strong { font-size: 15px; letter-spacing: .02em; white-space: nowrap; }
+    .brand span { color: #b8c9e5; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .topbar a { color: #d9e6ff; font-size: 13px; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr) 220px;
+      gap: 34px;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 34px 28px 90px;
+    }
+    .rail, .outline { align-self: start; position: sticky; top: 86px; max-height: calc(100vh - 110px); overflow: auto; }
+    .rail h2, .outline h2 {
+      margin: 0 0 12px;
+      color: var(--ink-soft);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .rail ol, .outline ol { list-style: none; margin: 0; padding: 0; }
+    .rail li { margin: 3px 0; }
+    .rail a, .outline a {
+      display: block;
+      padding: 6px 9px;
+      color: var(--ink-soft);
+      border-left: 2px solid transparent;
+      font-size: 13px;
+      line-height: 1.45;
+      text-decoration: none;
+    }
+    .rail a:hover, .outline a:hover,
+    .rail a.active, .outline a.active { color: var(--blue-dark); background: var(--surface-blue); border-left-color: var(--blue); }
+    .rail .note { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 12px; }
+
+    main { min-width: 0; }
+    .eyebrow { margin: 0 0 10px; color: var(--teal); font-size: 12px; font-weight: 700; letter-spacing: .11em; }
+    h1, h2, h3 { color: var(--ink); line-height: 1.25; }
+    h1 { max-width: 920px; margin: 0 0 18px; font-size: clamp(2.1rem, 4vw, 3.65rem); letter-spacing: -.035em; }
+    h2 { margin: 68px 0 18px; padding-top: 12px; font-size: 1.8rem; letter-spacing: -.02em; }
+    h3 { margin: 32px 0 10px; font-size: 1.2rem; }
+    p, ul, ol { max-width: var(--measure); }
+    p { margin: 0 0 16px; }
+    ul, ol { padding-left: 1.4em; }
+    li { margin: 6px 0; }
+    .lede { max-width: 760px; color: var(--ink-soft); font-size: 1.1rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 34px; }
+    .tag { padding: 4px 9px; color: var(--blue-dark); background: var(--surface-blue); border: 1px solid #cbdaf8; border-radius: 999px; font-size: 12px; }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 34px 36px 38px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--blue);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      position: absolute;
+      right: -50px;
+      bottom: -85px;
+      width: 240px;
+      height: 240px;
+      border: 1px solid #d5e1f8;
+      border-radius: 50%;
+      box-shadow: 0 0 0 22px #f2f6ff, 0 0 0 44px #f7f9ff;
+      content: "";
+      pointer-events: none;
+    }
+    .hero > * { position: relative; z-index: 1; }
+    .hero h1 { margin-top: 0; }
+    .hero .lede { margin-bottom: 0; }
+
+    .callout { margin: 24px 0; padding: 16px 18px; background: var(--surface); border-left: 4px solid var(--teal); border-radius: 0 var(--radius) var(--radius) 0; box-shadow: 0 4px 14px rgba(30,58,101,.04); }
+    .callout.warning { border-left-color: var(--amber); }
+    .callout strong { color: var(--blue-dark); }
+    .path { margin: 24px 0; padding: 18px 20px; overflow-x: auto; color: #e8f0ff; background: var(--code); border-radius: var(--radius); font: 14px/1.8 "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: pre; }
+    .path .accent { color: #7ddbe4; }
+
+    .code-wrap { position: relative; margin: 18px 0 24px; }
+    pre { max-width: 100%; margin: 0; padding: 20px; overflow-x: auto; color: var(--code-ink); background: var(--code); border-radius: var(--radius); font: 13px/1.72 "SFMono-Regular", Consolas, "Liberation Mono", monospace; tab-size: 2; }
+    code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    p code, li code, td code { padding: 2px 5px; color: var(--blue-dark); background: #e8eef9; border-radius: 4px; font-size: .9em; }
+    .copy { position: absolute; top: 8px; right: 8px; padding: 4px 8px; color: #c9d8f4; background: #20304b; border: 1px solid #3a4c6a; border-radius: 5px; cursor: pointer; font: 11px "SFMono-Regular", monospace; }
+    .copy:hover { color: #fff; background: #2b4163; }
+    .file { margin: 24px 0 8px; color: var(--ink-soft); font: 13px "SFMono-Regular", Consolas, monospace; }
+    .file::before { content: "FILE  "; color: var(--teal); font-weight: 700; letter-spacing: .08em; }
+
+    .table-wrap { max-width: 100%; margin: 18px 0 26px; overflow-x: auto; }
+    table { width: 100%; min-width: 620px; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); }
+    th, td { padding: 11px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--ink); background: #eef3fa; font-size: 13px; }
+    td { color: var(--ink-soft); font-size: 14px; }
+    tr:last-child td { border-bottom: 0; }
+
+    .steps { counter-reset: lesson; list-style: none; padding: 0; }
+    .steps > li { position: relative; margin: 26px 0; padding: 0 0 0 50px; }
+    .steps > li::before { position: absolute; top: 2px; left: 0; display: grid; place-items: center; width: 30px; height: 30px; color: #fff; background: var(--blue); border-radius: 50%; content: counter(lesson); counter-increment: lesson; font: 700 13px "SFMono-Regular", monospace; }
+    .steps h3 { margin-top: 0; }
+    .checklist { padding: 18px 20px 18px 42px; background: #f0f7f7; border: 1px solid #c8e5e5; border-radius: var(--radius); }
+    .checklist li::marker { color: var(--teal); }
+    .small { color: var(--ink-soft); font-size: 13px; }
+    .source { color: var(--ink-soft); font-size: 13px; }
+
+    footer { max-width: 1440px; margin: 0 auto; padding: 24px 28px 50px; color: var(--ink-soft); border-top: 1px solid var(--line); font-size: 13px; }
+
+    @media (max-width: 1120px) {
+      .shell { grid-template-columns: 220px minmax(0, 1fr); }
+      .outline { display: none; }
+    }
+    @media (max-width: 760px) {
+      .topbar { padding: 10px 16px; }
+      .brand span { display: none; }
+      .shell { display: block; padding: 20px 16px 60px; }
+      .rail { position: static; max-height: none; margin-bottom: 24px; padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+      .rail ol { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+      .rail .note { display: none; }
+      .hero { padding: 26px 21px 30px; }
+      h2 { margin-top: 50px; font-size: 1.55rem; }
+      pre { padding: 15px; font-size: 12px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><strong>pi-local-rag</strong><span>云端 Provider 源码阅读课</span></div>
+    <span><a href="rag-extension-usage.html">使用教程</a> · <a href="../../README.md">项目 README</a></span>
+  </header>
+
+  <div class="shell">
+    <nav class="rail" aria-label="课程章节">
+      <h2>阅读路线</h2>
+      <ol>
+        <li><a href="#goal">01 先看全局</a></li>
+        <li><a href="#contract">02 配置契约</a></li>
+        <li><a href="#lookup">03 文件查找</a></li>
+        <li><a href="#resolve">04 解析模型</a></li>
+        <li><a href="#factory">05 创建 Provider</a></li>
+        <li><a href="#request">06 发起请求</a></li>
+        <li><a href="#fingerprint">07 索引兼容</a></li>
+        <li><a href="#retrieval">08 检索链路</a></li>
+        <li><a href="#extension">09 Extension 入口</a></li>
+        <li><a href="#pitfalls">10 边界与自检</a></li>
+      </ol>
+      <p class="note">这不是一篇只讲 API 的说明，而是沿着一次真实调用，从 JSON 一直追到 HTTP 请求和索引发布。</p>
+    </nav>
+
+    <main>
+      <section class="hero" id="goal">
+        <p class="eyebrow">SOURCE WALKTHROUGH / 01</p>
+        <h1>把“云端 Provider”从一段硬编码，读成一条可追踪的数据流</h1>
+        <p class="lede">这篇教程针对当前仓库的真实实现：从 <code>provider.json</code> 的查找开始，沿着配置解析、Provider 工厂、Voyage HTTP 请求，一直走到索引兼容性和 Pi Extension 的自动注入。重点不是记住文件名，而是理解每一步为什么存在。</p>
+        <div class="meta"><span class="tag">代码：pi-local-rag</span><span class="tag">主题：云端 Embedding + Reranker</span><span class="tag">前置：会读 TypeScript 基础</span></div>
+      </section>
+
+      <div class="callout"><strong>先记住一句话：</strong><code>config.json</code> 负责“选谁”，<code>provider.json</code> 负责“这个 Provider 是什么、能选哪些模型”，TypeScript 适配器负责“怎样把请求发出去”。</div>
+
+      <h2 id="contract">01 · 先看全局：三个文件各自负责什么</h2>
+      <p>第一次读这类改造，最容易把“配置”“Provider 实例”“HTTP 协议”混在一起。先把职责拆开，后面的代码会非常清楚。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>文件</th><th>它回答的问题</th><th>它不负责什么</th></tr></thead>
+          <tbody>
+            <tr><td><code>config.json</code></td><td>当前这次 RAG 要用哪个 Provider、哪个 Model？</td><td>不保存 API Key；不定义模型完整目录。</td></tr>
+            <tr><td><code>provider.json</code></td><td>有哪些 Provider？它们的地址、鉴权环境变量和模型元数据是什么？</td><td>不实现 HTTP 请求；不保存密钥值。</td></tr>
+            <tr><td><code>providers/**/*.ts</code></td><td>如何构造请求、发送请求、解析响应、处理取消和重试？</td><td>不负责决定用户选择了哪个模型。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>当前默认的 Provider Registry 在 <code>pi-local-rag/provider.json</code>。其中有三个不同层次的 ID：</p>
+      <div class="path"><span class="accent">config.json</span>
+  embedding.provider = "voyage"
+          │
+          ▼
+<span class="accent">provider.json</span>
+  providers.voyage.type = "voyage"
+  providers.voyage.baseUrl = "https://api.voyageai.com/v1"
+  providers.voyage.auth.env = "VOYAGE_API_KEY"
+          │
+          ▼
+<span class="accent">TypeScript adapter</span>
+  VoyageEmbeddingProvider / VoyageReranker</div>
+      <p>因此，Provider Registry Key 不一定等于适配器类型。比如未来可以出现：</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>{
+  "providers": {
+    "company-proxy": {
+      "type": "voyage",
+      "baseUrl": "https://proxy.example.com/v1",
+      "auth": { "type": "bearer", "env": "COMPANY_VOYAGE_KEY" },
+      "models": {
+        "embedding": { "voyage-4-lite": { "dimensions": 1024 } },
+        "rerank": { "rerank-2.5-lite": {} }
+      }
+    }
+  }
+}</code></pre></div>
+      <p><code>company-proxy</code> 是用户可读的配置名，<code>voyage</code> 是实际协议适配器名。这正是 Provider 抽象存在的意义：地址可以换，名称可以换，但协议实现不必重复复制。</p>
+
+      <h2 id="lookup">02 · 配置文件从哪里来：精确的查找顺序</h2>
+      <p>入口是 <code>store.ts</code> 的 <code>getRagDir()</code>。它先决定“当前 RAG 数据属于哪个目录”，然后 <code>provider-config.ts</code> 才在这个目录下找 <code>provider.json</code>。</p>
+      <div class="file">pi-local-rag/store.ts · getRagDir() / providerFile()</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>export function providerFile(ragDir: string): string {
+  return join(ragDir, "provider.json");
+}</code></pre></div>
+      <p>当前 RAG 目录的优先级是：</p>
+      <ol>
+        <li><code>--rag-dir</code> 显式参数；</li>
+        <li><code>PI_RAG_DIR</code> 环境变量；</li>
+        <li>从当前工作目录向上寻找已经存在的 <code>.pi/rag/</code>；</li>
+        <li>否则使用 <code>~/.pi/rag/</code> 全局目录。</li>
+      </ol>
+      <p>接着，<code>providerFilePath()</code> 使用下面的策略：</p>
+      <div class="file">pi-local-rag/provider-config.ts · providerFilePath() · 约第 66 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>export function providerFilePath(): string {
+  const local = providerFile(getRagDir());
+  if (existsSync(local)) return local;
+
+  return fileURLToPath(
+    new URL("./provider.json", import.meta.url),
+  );
+}</code></pre></div>
+      <p>它的真实含义是：</p>
+      <div class="path">&lt;当前 RAG 目录&gt;/provider.json
+        │ 存在 → 使用项目/全局覆盖文件
+        │ 不存在
+        ▼
+provider-config.ts 同目录/provider.json
+        │ 使用随 Extension 发布的默认 Registry</div>
+      <div class="callout warning"><strong>注意：</strong>这里不是递归搜索当前代码目录的所有子目录。不会扫描 <code>./src/provider.json</code>、<code>./config/provider.json</code> 等路径；只会检查两个固定位置。</div>
+      <p>而且项目文件一旦存在，就<strong>完全替代</strong>内置文件，不会和内置 Registry 深度合并。原因是合并后用户很难判断最终生效的模型目录；明确的全量覆盖更容易排查问题。</p>
+
+      <h2 id="resolve">03 · 加载 Registry：JSON 如何变成类型安全的对象</h2>
+      <p><code>loadProviderFile()</code> 做三件事：确定文件路径、解析 JSON、验证最外层结构。它不是把所有字段都强行转换，而是先阻止明显错误进入 Factory。</p>
+      <div class="file">pi-local-rag/provider-config.ts · loadProviderFile() · 约第 84 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>const providers: Record<string, ProviderDefinition> = {};
+
+for (const [id, value] of Object.entries(raw.providers)) {
+  if (!isRecord(value) ||
+      typeof value.type !== "string" ||
+      !isRecord(value.models)) {
+    throw new ProviderConfigError(
+      `Provider "${id}" must define type and models in ${file}.`,
+    );
+  }
+
+  if (!["transformers", "voyage", "noop"].includes(value.type)) {
+    throw new ProviderConfigError(
+      `Provider "${id}" has unsupported type "${value.type}".`,
+    );
+  }
+
+  providers[id] = value as unknown as ProviderDefinition;
+}</code></pre></div>
+      <p>几个细节要特别理解：</p>
+      <ul>
+        <li><code>isRecord()</code> 排除数组和 <code>null</code>，避免把错误结构当成 Provider。</li>
+        <li><code>version: 1</code> 是 Registry 格式版本，不是 API Key 版本，也不是模型版本。</li>
+        <li><code>type</code> 目前只允许已有适配器：<code>transformers</code>、<code>voyage</code>、<code>noop</code>。</li>
+        <li>解析失败会抛出 <code>ProviderConfigError</code>，不会偷偷退回 Voyage 默认值。</li>
+      </ul>
+
+      <h3>getModelSpec：不读取密钥的元数据查询</h3>
+      <p><code>getModelSpec()</code> 只回答“这个 Provider 有没有这个角色、这个模型，它的类型、地址和维度是什么”。它不要求环境变量已经存在。</p>
+      <div class="file">pi-local-rag/provider-config.ts · getModelSpec() · 约第 134 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>const provider = file.providers[providerId];
+if (!provider) {
+  throw new ProviderConfigError(
+    `Unsupported ${role} provider "${providerId}".`,
+  );
+}
+
+const definition = requiredModel(provider, providerId, role, model);
+return {
+  providerId,
+  type: provider.type,
+  baseUrl: provider.baseUrl,
+  model,
+  dimensions: definition.dimensions,
+};</code></pre></div>
+      <p>它适合做配置验证和生成索引 Fingerprint，因为这两个场景需要知道模型元数据，但不应该在“只读状态”阶段就因为缺少 API Key 而失败。</p>
+
+      <h3>resolveModel：真正创建 Provider 前解析凭据</h3>
+      <p><code>resolveModel()</code> 在 <code>getModelSpec()</code> 的基础上读取 <code>auth.env</code> 指向的环境变量：</p>
+      <div class="file">pi-local-rag/provider-config.ts · resolveModel() · 约第 157 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>if (provider.auth) {
+  const value = process.env[provider.auth.env];
+  if (!value) {
+    throw new ProviderConfigError(
+      `${provider.auth.env} is required by provider "${providerId}".`,
+    );
+  }
+  spec.apiKey = value;
+}</code></pre></div>
+      <p>所以密钥永远只存在于进程内存里：</p>
+      <div class="path">provider.json
+  auth.env = "VOYAGE_API_KEY"  ← 只存变量名
+          │
+          ▼
+process.env.VOYAGE_API_KEY   ← 运行时读取真实值
+          │
+          ▼
+spec.apiKey                  ← 只传给适配器，不写回 JSON</div>
+      <p>这就是为什么 Provider 可以换别名、换代理、换密钥变量，而不需要改 <code>VoyageEmbeddingProvider</code> 的鉴权代码。</p>
+
+      <h2 id="factory">04 · Factory：把“配置对象”变成“可调用对象”</h2>
+      <p>Factory 是整个改造的中心。它不直接发 HTTP，而是把 Registry 中的 <code>type</code> 映射到已有实现。</p>
+      <div class="file">pi-local-rag/providers/embedding/factory.ts · createEmbeddingProvider() · 约第 86 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>export function createEmbeddingProvider(
+  config: RagConfig = loadConfig(),
+): EmbeddingProvider {
+  assertValidConfig(config);
+
+  const spec = resolveModel(
+    config.embedding.provider,
+    "embedding",
+    config.embedding.model,
+  );
+
+  const dimensions = spec.dimensions;
+  if (dimensions === undefined) {
+    throw new Error("Embedding model has no dimensions in provider.json");
+  }
+
+  return cached(cacheKey({ /* ... */ }), () =>
+    buildProvider({
+      id: spec.providerId,
+      type: spec.type,
+      baseUrl: spec.baseUrl,
+      model: spec.model,
+      dimensions,
+      apiKey: spec.apiKey,
+      timeoutMs: config.http.timeoutMs,
+      maxRetries: config.http.maxRetries,
+    }),
+  );
+}</code></pre></div>
+      <p>按执行顺序拆开：</p>
+      <ol>
+        <li><code>assertValidConfig(config)</code>：确认 RAG 的普通配置和 Provider Registry 没有明显错误。</li>
+        <li><code>resolveModel()</code>：把 Provider ID 和 Model 名称变成具体规格。</li>
+        <li>取 <code>dimensions</code>：SQLite 向量表必须知道维度，不能让 Provider 自己临时猜。</li>
+        <li><code>cacheKey()</code>：用完整合同生成缓存键。</li>
+        <li><code>buildProvider()</code>：根据 <code>spec.type</code> 创建具体类。</li>
+      </ol>
+
+      <h3>为什么缓存键要包含 Base URL 和 HTTP 参数</h3>
+      <p>缓存键不是简单的 <code>provider + model</code>：</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>[
+  opts.id,
+  opts.type,
+  opts.baseUrl ?? "",
+  opts.model,
+  opts.dimensions,
+  opts.apiKey ?? "",
+  opts.http.timeoutMs,
+  opts.http.maxRetries,
+].join("|")</code></pre></div>
+      <p>原因是 Provider 实例内部持有 endpoint、API Key、超时和重试策略。如果只按模型名缓存，修改代理地址后可能继续使用旧实例。缓存的是<strong>完整可复用合同</strong>，不是只缓存一个名字。</p>
+
+      <h3>type 如何映射到实现</h3>
+      <div class="file">pi-local-rag/providers/embedding/factory.ts · buildProvider() · 约第 41 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>if (opts.type === "transformers") {
+  return new LocalEmbeddingProvider({
+    model: opts.model,
+    dimensions: opts.dimensions,
+  });
+}
+
+if (opts.type === "voyage") {
+  return new VoyageEmbeddingProvider({
+    id: opts.id,
+    baseUrl: opts.baseUrl,
+    model: opts.model,
+    dimensions: opts.dimensions,
+    apiKey: opts.apiKey,
+  });
+}</code></pre></div>
+      <p>这就是“配置驱动”的边界：JSON 可以选择和参数化已有适配器，但不能凭空创造一个未知 HTTP 协议。未来若要接 OpenAI-compatible 或 Cohere，需要新增对应的 <code>type</code> 和请求/响应解析代码。</p>
+
+      <h2 id="request">05 · Voyage 适配器：配置如何进入真实 HTTP 请求</h2>
+      <p>Factory 只把配置传给 <code>VoyageEmbeddingProvider</code>。真正拼接 endpoint、构造 body、调用 HTTP 工具的是 Voyage 类。</p>
+      <div class="file">pi-local-rag/providers/embedding/voyage.ts · constructor / requestBatch()</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>this.endpoint =
+  `${(opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "")}/embeddings`;</code></pre></div>
+      <p>例如：</p>
+      <div class="table-wrap"><table><thead><tr><th>provider.json 的 baseUrl</th><th>最终 Embedding endpoint</th></tr></thead><tbody>
+        <tr><td><code>https://api.voyageai.com/v1</code></td><td><code>https://api.voyageai.com/v1/embeddings</code></td></tr>
+        <tr><td><code>https://proxy.example.com/v1/</code></td><td><code>https://proxy.example.com/v1/embeddings</code></td></tr>
+      </tbody></table></div>
+      <p>构造请求体时，Provider 配置中的模型和维度被放进 Voyage API 所需字段：</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>const body = {
+  input: texts,
+  model: this.model,
+  input_type: inputType,
+  truncation: false,
+  output_dtype: "float",
+  output_dimension: this.dimensions,
+};
+
+const json = await postJson(this.endpoint, body, {
+  apiKey: this.apiKey,
+  timeoutMs: this.timeoutMs,
+  maxRetries: this.maxRetries,
+  signal,
+});</code></pre></div>
+      <p>这里要注意三个层次：</p>
+      <ul>
+        <li><code>model</code> 来自 <code>config.json</code> 选择的模型，并经过 <code>provider.json</code> 验证。</li>
+        <li><code>output_dimension</code> 来自 <code>provider.json</code> 的模型元数据。</li>
+        <li><code>apiKey</code> 来自 <code>auth.env</code> 指定的环境变量。</li>
+      </ul>
+      <p>因此，<code>provider.json</code> 不是一个“只改变名字”的配置；它会影响最终发送给服务端的模型、维度和地址。</p>
+
+      <h3>Reranker 为什么是另一条路径</h3>
+      <p>Reranker 不负责生成向量，只负责给候选文档重新排序。它复用同一套 Registry 解析，但 Factory 选择 <code>VoyageReranker</code>：</p>
+      <div class="file">pi-local-rag/providers/reranker/factory.ts · createReranker() · 约第 25 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>const spec = resolveModel(
+  config.reranker.provider,
+  "rerank",
+  config.reranker.model,
+);
+
+if (spec.type === "noop") return new NoneReranker();
+if (spec.type === "voyage") {
+  return new VoyageReranker({
+    id: spec.providerId,
+    baseUrl: spec.baseUrl,
+    model: spec.model,
+    apiKey: spec.apiKey,
+  });
+}</code></pre></div>
+      <p>Rerank 请求体是：</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>{
+  query,
+  documents: candidates.map(c => c.text),
+  model: this.model,
+  top_k: opts?.topK ?? candidates.length,
+  truncation: false,
+}</code></pre></div>
+      <p>Embedding 和 Rerank 共用 Provider 选择机制，但使用不同的 endpoint、请求字段和响应解析。这是正确的抽象边界：配置统一，不代表业务协议也必须相同。</p>
+
+      <h2 id="fingerprint">06 · Fingerprint：为什么换了 endpoint 也必须重建索引</h2>
+      <p>如果只把 Provider、Model 和维度写进索引指纹，会漏掉一个危险情况：Provider 名称没变，但 Base URL 换了。代理可能返回不同向量空间，旧索引就不能安全地和新查询向量混用。</p>
+      <div class="file">pi-local-rag/fingerprint.ts · providerContractHash() · 约第 34 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>return createHash("sha256")
+  .update(JSON.stringify({
+    provider: embedding.provider,
+    type: spec.type,
+    baseUrl: spec.baseUrl ?? "",
+    model: embedding.model,
+    dimensions: spec.dimensions ?? embedding.dimensions,
+  }))
+  .digest("hex")
+  .slice(0, 16);</code></pre></div>
+      <p>这里刻意没有把 API Key 放入 hash。密钥变化不应该让索引失效；Endpoint、协议类型、模型和维度变化则可能影响向量语义，应该触发重建。</p>
+      <p>完整 Embedding Fingerprint 大致是：</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>{
+  provider: "voyage",
+  model: "voyage-4-lite",
+  dimensions: 1024,
+  providerContract: "非密钥配置摘要",
+  contract: "l2-unit-v1"
+}</code></pre></div>
+      <p>旧索引没有 <code>providerContract</code> 时，代码允许按照旧的 Provider/Model/Dimensions 逻辑继续兼容；新旧两边都有摘要后，摘要不一致就会要求重建。</p>
+
+      <h3>兼容性检查在哪里发生</h3>
+      <div class="file">pi-local-rag/index-manager.ts · checkIndexCompatibility() · 约第 85 行</div>
+      <p>它拿当前配置生成 <code>desiredEmb</code>，再和数据库 metadata 中保存的 <code>storedEmb</code> 比较。以下情况会返回 <code>needsRebuild</code>：</p>
+      <ul>
+        <li>数据库没有 Fingerprint；</li>
+        <li>向量表维度和配置不一致；</li>
+        <li>Provider、Model、维度或 Provider Contract 不一致；</li>
+        <li>解析器或 Chunker 的 Processing Fingerprint 不一致。</li>
+      </ul>
+      <p>重建时不是直接覆盖旧库，而是先写 staging 数据库，成功后更新 <code>active.json</code>。因此 Provider 配置错误或云端请求失败时，旧索引仍然可以保留。</p>
+
+      <h2 id="retrieval">07 · 检索链路：Provider 如何参与一次查询</h2>
+      <p>一次查询大致经过下面的路径：</p>
+      <div class="path">Pi 用户问题
+   │
+   ▼
+before_agent_start / rag_query
+   │
+   ▼
+loadConfig() → loadProviderFile() → resolveModel()
+   │
+   ├── Embedding: createEmbeddingProvider()
+   │       └── embedQuery() → Voyage /embeddings
+   │
+   ├── BM25: SQLite FTS5
+   │
+   └── Reranker: createReranker()
+           └── Voyage /rerank（如果启用）</div>
+      <p>检索实现位于 <code>retrieval.ts</code>。它不会直接判断 Provider 名字是不是 <code>voyage</code>，而是问 Factory“这个配置对应什么类型”：</p>
+      <div class="file">pi-local-rag/retrieval.ts · retrieveWithCandidates() · 约第 42 行</div>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>if (configuredRerankerIsEnabled(config)) {
+  try {
+    reranker = createReranker(config);
+    expand = reranker.id !== "none";
+  } catch (err) {
+    rerankDegraded =
+      `reranker unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    reranker = new NoneReranker();
+  }
+}</code></pre></div>
+      <p>因此一个 Provider 别名也不会影响“是否启用 Rerank”的判断，判断依据是 Registry 中的 <code>type</code>。当 Rerank 不可用时，检索不会直接崩溃，而是保留 BM25/向量结果并附带 <code>degraded</code> 信息。</p>
+
+      <h3>Embedding 失败时为什么可以 BM25 降级</h3>
+      <p>Embedding Provider 抛出的错误会在 <code>search.ts</code> 的向量查询阶段被识别。对于网络错误、超时、429、5xx 等临时问题，代码保留 FTS 结果，并把原因写入 <code>embedDegraded</code>。</p>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>try {
+  const provider = embeddingProviderForIndex(database, config);
+  const queryVec = await provider.embedQuery(query, { signal });
+  vecResults = repo.searchVectors(database, queryVec, vecLimit);
+} catch (err) {
+  if (isTransientEmbedError(err)) {
+    embedDegraded =
+      `query embedding failed, BM25 only: ${err.message}`;
+  } else {
+    throw err;
+  }
+}</code></pre></div>
+      <p>这里体现了 Provider 抽象和业务降级的分离：适配器只报告“调用失败”，检索层决定“失败后是否继续用 BM25”。</p>
+
+      <h2 id="extension">08 · Extension 入口：Provider 何时真正被触发</h2>
+      <p><code>index.ts</code> 是 Pi Extension 的注册入口。它本身不实现 Voyage 协议，只负责把 Provider 系统接到 Pi 的生命周期和工具上。</p>
+      <div class="file">pi-local-rag/index.ts · before_agent_start() · 约第 125 行</div>
+      <p>每轮 Agent 开始前，它会：</p>
+      <ol>
+        <li>读取 <code>config.json</code>；</li>
+        <li>检查当前索引是否兼容；</li>
+        <li>必要时触发自动刷新；</li>
+        <li>调用 <code>retrieve()</code>；</li>
+        <li>把结果包装成隐藏的 RAG 上下文消息返回给 Pi。</li>
+      </ol>
+      <div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>const compat = checkIndexCompatibility(database, config);
+if (!compat.ok) {
+  // 不使用不兼容的旧向量
+  return;
+}
+
+results = await retrieve(event.prompt, {
+  limit: config.ragTopK,
+  alpha: config.ragAlpha,
+  db: database,
+  config,
+  signal,
+});</code></pre></div>
+      <p>所以用户看到的命令和工具只是入口，真正的云端调用发生在下面的业务方法中：</p>
+      <div class="table-wrap"><table><thead><tr><th>Pi 入口</th><th>调用链</th><th>Provider 什么时候出现</th></tr></thead><tbody>
+        <tr><td><code>/rag index</code> / <code>rag_index</code></td><td><code>indexFiles()</code> → <code>createEmbeddingProvider()</code></td><td>为文档生成 Embedding。</td></tr>
+        <tr><td><code>/rag search</code> / <code>rag_query</code></td><td><code>retrieveWithCandidates()</code> → <code>embeddingProviderForIndex()</code></td><td>为查询生成向量；可选 Rerank。</td></tr>
+        <tr><td><code>before_agent_start</code></td><td>自动刷新 + <code>retrieve()</code></td><td>每轮对话可能触发查询或刷新。</td></tr>
+        <tr><td><code>/rag status</code> / <code>rag_status</code></td><td>读取配置和索引状态</td><td>展示 Provider/Model/维度，不一定发云端请求。</td></tr>
+      </tbody></table></div>
+
+      <h2 id="pitfalls">09 · 完整走一遍：默认 Voyage 的实际过程</h2>
+      <ol class="steps">
+        <li><h3>读取 <code>config.json</code></h3><p>假设配置为：</p><div class="code-wrap"><button class="copy" type="button">复制</button><pre><code>{
+  "embedding": {
+    "provider": "voyage",
+    "model": "voyage-4-lite",
+    "dimensions": 1024
+  },
+  "reranker": {
+    "provider": "voyage",
+    "model": "rerank-2.5-lite"
+  }
+}</code></pre></div><p><code>loadConfigDetailed()</code> 读取这个选择，并调用 <code>validateConfig()</code>。</p></li>
+        <li><h3>找到 Registry</h3><p><code>providerFilePath()</code> 找到 <code>&lt;ragDir&gt;/provider.json</code>；如果不存在，找到 <code>provider-config.ts</code> 同目录的内置 Registry。</p></li>
+        <li><h3>验证模型和密钥</h3><p><code>getModelSpec("voyage", "embedding", "voyage-4-lite")</code> 得到 <code>type: "voyage"</code>、<code>baseUrl</code> 和 <code>dimensions: 1024</code>；<code>resolveModel()</code> 再读取 <code>VOYAGE_API_KEY</code>。</p></li>
+        <li><h3>创建 Embedding 对象</h3><p><code>createEmbeddingProvider()</code> 计算缓存键，<code>buildProvider()</code> 创建 <code>VoyageEmbeddingProvider</code>。</p></li>
+        <li><h3>生成文档向量</h3><p><code>indexFiles()</code> 读取文件、切块，然后调用 <code>embedDocuments()</code>。Voyage 类按批次请求 <code>/embeddings</code>，按返回的 <code>index</code> 放回原输入位置。</p></li>
+        <li><h3>检查并写入索引</h3><p>数据库保存 chunks 和 vectors，同时写入 Embedding Fingerprint。维度不匹配、响应缺项或请求失败时，不会把不完整结果发布为活动索引。</p></li>
+        <li><h3>执行查询</h3><p><code>embeddingProviderForIndex()</code> 从活动索引 Fingerprint 读取历史 Provider/Model，再从当前 Registry 重新解析它，生成 query vector，然后和 SQLite 向量结果、FTS 结果合并。</p></li>
+        <li><h3>可选 Rerank</h3><p>如果 Reranker 的类型不是 <code>noop</code>，Factory 创建 Voyage Reranker，对候选文本调用 <code>/rerank</code>；失败则返回原始候选，并附带降级原因。</p></li>
+      </ol>
+
+      <h2 id="limits">10 · 你可以配置什么，不能配置什么</h2>
+      <h3>现在可以做到</h3>
+      <ul>
+        <li>默认 Voyage Embedding；</li>
+        <li>默认 Voyage Reranker；</li>
+        <li>为 Voyage 协议配置别名；</li>
+        <li>替换兼容 Voyage 的 Base URL；</li>
+        <li>替换 API Key 环境变量名；</li>
+        <li>在 Registry 中增加多个 Voyage-compatible 模型；</li>
+        <li>让本地、noop 和云端 Provider 走统一配置校验。</li>
+      </ul>
+      <h3>现在还不能只靠 JSON 做到</h3>
+      <ul>
+        <li>自动发现远端模型列表；</li>
+        <li>自动把任意 OpenAI/Cohere/Jina API 转成当前请求格式；</li>
+        <li>在 JSON 中描述任意复杂认证流程；</li>
+        <li>为每种模型自由编写完全不同的 body 和响应解析逻辑。</li>
+      </ul>
+      <div class="callout warning"><strong>最重要的边界：</strong><code>provider.json</code> 统一的是“Provider 注册和配置”，不是“所有云端协议的实现”。新的 wire protocol 仍然需要新的 TypeScript adapter。</div>
+
+      <h2 id="self-check">11 · 自检：读懂这套代码的五个问题</h2>
+      <ol class="checklist">
+        <li>如果 <code>.pi/rag/provider.json</code> 不存在，代码会去哪里找？</li>
+        <li><code>config.json</code> 中的 <code>provider: "my-voyage"</code> 是否必须等于 <code>type: "voyage"</code>？</li>
+        <li>为什么 <code>getModelSpec()</code> 不读取 API Key，而 <code>resolveModel()</code> 要读取？</li>
+        <li>如果只修改了 <code>baseUrl</code>，为什么索引需要重建？</li>
+        <li>Voyage Embedding 失败时，为什么检索可以退回 BM25，而维度不匹配时不能继续？</li>
+      </ol>
+      <p>如果能回答这五个问题，你应该能够从任意一个入口文件开始，反向追踪到 Provider Registry、Factory、HTTP 适配器和索引发布。</p>
+
+      <h2>下一步练习</h2>
+      <p>建议按下面顺序动手，不要一开始就改 Factory：</p>
+      <ol>
+        <li>在临时 <code>PI_RAG_DIR</code> 中写一个只有 <code>my-voyage</code> 的 <code>provider.json</code>；</li>
+        <li>调用 <code>resolveModel("my-voyage", "embedding", "voyage-4-lite")</code>，观察返回的 <code>baseUrl</code>；</li>
+        <li>调用 <code>createEmbeddingProvider()</code>，观察返回对象的 <code>id</code> 是 <code>my-voyage</code>；</li>
+        <li>修改测试环境中的 <code>baseUrl</code>，观察缓存键和 Fingerprint 都发生变化；</li>
+        <li>最后再尝试把一个新的非 Voyage 协议接入，明确列出它需要新增的 adapter 接口。</li>
+      </ol>
+      <p class="source">本教程对应仓库当前实现：<code>provider.json</code>、<code>provider-config.ts</code>、<code>config.ts</code>、<code>providers/embedding/factory.ts</code>、<code>providers/reranker/factory.ts</code>、<code>fingerprint.ts</code>、<code>index-manager.ts</code>、<code>indexing.ts</code>、<code>retrieval.ts</code>、<code>index.ts</code>。</p>
+    </main>
+
+    <aside class="outline" aria-label="本页目录">
+      <h2>本页目录</h2>
+      <ol>
+        <li><a href="#goal">课程目标</a></li>
+        <li><a href="#contract">配置契约</a></li>
+        <li><a href="#lookup">文件查找</a></li>
+        <li><a href="#resolve">模型解析</a></li>
+        <li><a href="#factory">Provider 工厂</a></li>
+        <li><a href="#request">HTTP 请求</a></li>
+        <li><a href="#fingerprint">索引兼容</a></li>
+        <li><a href="#retrieval">检索流程</a></li>
+        <li><a href="#extension">Extension 入口</a></li>
+        <li><a href="#pitfalls">完整案例</a></li>
+        <li><a href="#limits">能力边界</a></li>
+        <li><a href="#self-check">自检题</a></li>
+      </ol>
+    </aside>
+  </div>
+
+  <footer>本页是针对当前仓库实现的源码阅读材料。页面中的路径、函数名和代码片段用于解释实际控制流；若后续代码变化，应以仓库中的最新实现为准。</footer>
+
+  <script>
+    (() => {
+      const links = [...document.querySelectorAll('.outline a')];
+      const sections = links.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+      const observer = new IntersectionObserver(entries => {
+        const visible = entries.filter(entry => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        links.forEach(link => link.classList.toggle('active', link.getAttribute('href') === '#' + visible.target.id));
+      }, { rootMargin: '-15% 0px -70% 0px', threshold: [0, .2, .6] });
+      sections.forEach(section => observer.observe(section));
+
+      document.querySelectorAll('.copy').forEach(button => {
+        button.addEventListener('click', async () => {
+          const code = button.nextElementSibling?.querySelector('code')?.textContent || '';
+          try {
+            await navigator.clipboard.writeText(code);
+            const old = button.textContent;
+            button.textContent = '已复制';
+            setTimeout(() => { button.textContent = old; }, 1200);
+          } catch {
+            button.textContent = '请手动复制';
+          }
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

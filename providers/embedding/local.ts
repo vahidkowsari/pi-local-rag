@@ -52,9 +52,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         results[start + j] = Array.from(flat.subarray(j * dim, (j + 1) * dim));
       }
       opts?.onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
+      throwIfAborted(opts?.signal);
       await yield_();
     }
 
+    throwIfAborted(opts?.signal);
     return assertValidVectors(results, texts.length, this.dimensions);
   }
 }

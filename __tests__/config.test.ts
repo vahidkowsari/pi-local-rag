@@ -3,8 +3,10 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync, readFileSync, existsS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  defaultConfig, loadConfig, saveConfig, validateConfig, applyEnvOverrides, voyageApiKey,
+  defaultConfig, loadConfig, loadConfigDetailed, saveConfig, validateConfig, applyEnvOverrides, voyageApiKey,
+  ConfigFileInvalidError, resetBrokenConfig, requireWritableConfig,
 } from "../config.ts";
+import { shouldAutoRefresh } from "../indexing.ts";
 import { createEmbeddingProvider } from "../providers/embedding/factory.ts";
 
 describe("config merge, env overlay, validation", () => {
@@ -107,6 +109,59 @@ describe("config merge, env overlay, validation", () => {
       ...defaultConfig(),
       embedding: { provider: "voyage", model: "voyage-4-lite", dimensions: 1024 },
     })).toThrow(/VOYAGE_API_KEY/);
+  });
+
+  it("broken JSON is reported as invalid instead of a silent default", () => {
+    writeFileSync(join(ragDir, "config.json"), "{BROKEN");
+    const loaded = loadConfigDetailed();
+    expect(loaded.fileStatus).toBe("invalid");
+    expect(loaded.issues.join("\n")).toMatch(/invalid JSON/i);
+    expect(loaded.config.embedding.provider).toBe("local");
+  });
+
+  it("saveConfig refuses to overwrite an invalid config.json", () => {
+    writeFileSync(join(ragDir, "config.json"), "{BROKEN");
+    expect(() => saveConfig(defaultConfig())).toThrow(ConfigFileInvalidError);
+    expect(readFileSync(join(ragDir, "config.json"), "utf-8")).toBe("{BROKEN");
+  });
+
+  it("resetBrokenConfig keeps the original file as a backup and writes defaults", () => {
+    writeFileSync(join(ragDir, "config.json"), "{BROKEN");
+    const backup = resetBrokenConfig();
+    expect(existsSync(backup)).toBe(true);
+    expect(readFileSync(backup, "utf-8")).toBe("{BROKEN");
+    expect(loadConfigDetailed().fileStatus).toBe("ok");
+    expect(loadConfig().embedding.provider).toBe("local");
+  });
+
+  it("string false is not a valid cloudAutoRefresh value", () => {
+    const cfg = { ...defaultConfig(), cloudAutoRefresh: "false" as unknown as boolean };
+    expect(validateConfig(cfg).join("\n")).toMatch(/cloudAutoRefresh must be a boolean/);
+    const voyage = {
+      ...cfg,
+      embedding: { provider: "voyage" as const, model: "voyage-4-lite", dimensions: 1024 },
+    };
+    process.env.VOYAGE_API_KEY = "synthetic";
+    expect(shouldAutoRefresh(voyage, {
+      totalChunks: 1, totalFiles: 1, totalTokens: 1, embeddedCount: 1,
+      lastBuild: "2020-01-01T00:00:00Z", embeddingModel: "voyage-4-lite",
+    })).toBe(false);
+    writeFileSync(join(ragDir, "config.json"), JSON.stringify({ cloudAutoRefresh: "false" }));
+    const loaded = loadConfigDetailed();
+    expect(loaded.issues.join("\n")).toMatch(/cloudAutoRefresh must be a boolean/);
+    expect(() => requireWritableConfig()).toThrow(ConfigFileInvalidError);
+    delete process.env.VOYAGE_API_KEY;
+  });
+
+  it("numeric cloudAutoRefresh is a type issue", () => {
+    const cfg = { ...defaultConfig(), cloudAutoRefresh: 0 as unknown as boolean };
+    expect(validateConfig(cfg).join("\n")).toMatch(/must be a boolean/);
+  });
+
+  it("local MiniLM with the wrong dimension is a config issue", () => {
+    const cfg = defaultConfig();
+    cfg.embedding.dimensions = 1024;
+    expect(validateConfig(cfg).join("\n")).toMatch(/requires 384/);
   });
 
   it("applyEnvOverrides does not mutate the input object", () => {

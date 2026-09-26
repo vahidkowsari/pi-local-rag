@@ -1,11 +1,13 @@
+import { sleep, throwIfAborted } from "../abort.ts";
+
 export class HttpError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly retryable: boolean,
-  ) {
+  readonly status: number;
+  readonly retryable: boolean;
+  constructor(message: string, status: number, retryable: boolean) {
     super(message);
     this.name = "HttpError";
+    this.status = status;
+    this.retryable = retryable;
   }
 }
 
@@ -22,13 +24,6 @@ function retryDelayMs(res: Response | undefined, attempt: number): number {
     if (!Number.isNaN(when)) return Math.max(0, Math.min(when - Date.now(), 30_000));
   }
   return Math.min(1000 * 2 ** attempt, 8_000);
-}
-
-function throwIfAborted(signal?: AbortSignal) {
-  if (!signal?.aborted) return;
-  const err = new Error("Request cancelled");
-  err.name = "AbortError";
-  throw err;
 }
 
 export interface PostJsonOptions {
@@ -62,19 +57,19 @@ export async function postJson<T>(url: string, body: unknown, opts: PostJsonOpti
       const err = new HttpError(`HTTP ${res.status}: ${text.slice(0, 200)}`, res.status, retryable);
       if (!retryable || attempt === opts.maxRetries) throw err;
       lastErr = err;
-      await new Promise(r => setTimeout(r, retryDelayMs(res, attempt)));
+      await sleep(retryDelayMs(res, attempt), opts.signal);
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         if (opts.signal?.aborted) throw err;
         lastErr = new HttpError(`HTTP timeout after ${opts.timeoutMs}ms`, 0, true);
         if (attempt === opts.maxRetries) throw lastErr;
-        await new Promise(r => setTimeout(r, retryDelayMs(undefined, attempt)));
+        await sleep(retryDelayMs(undefined, attempt), opts.signal);
         continue;
       }
       if (err instanceof HttpError) {
         if (!err.retryable || attempt === opts.maxRetries) throw err;
         lastErr = err;
-        await new Promise(r => setTimeout(r, retryDelayMs(undefined, attempt)));
+        await sleep(retryDelayMs(undefined, attempt), opts.signal);
         continue;
       }
       throw err;

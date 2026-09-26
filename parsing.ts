@@ -11,6 +11,9 @@ export interface SourceBlock {
   /** 1-based PDF physical page. null for non-PDF. */
   pageStart: number | null;
   pageEnd: number | null;
+  /** 1-based original file lines. null when unknown (typical for PDF). */
+  lineStart?: number | null;
+  lineEnd?: number | null;
 }
 
 export interface ParsedDocument {
@@ -35,16 +38,39 @@ export async function extractBlocks(fp: string): Promise<ParsedDocument> {
 
 function textToBlocks(text: string, ext: string): SourceBlock[] {
   if (!text.trim()) return [];
+  const converted = ext === ".html" || ext === ".htm" || ext === ".docx";
+  if (converted) {
+    return [{ text, section: null, pageStart: null, pageEnd: null, lineStart: null, lineEnd: null }];
+  }
+  const lines = text.split("\n");
   if (ext === ".md" || ext === ".mdx") {
-    const parts = text.split(/^(?=#{1,6} )/m).filter(p => p.trim().length > 20);
-    if (parts.length) {
-      return parts.map(p => {
-        const m = p.match(/^(#{1,6}) (.*)$/m);
-        return { text: p, section: m ? m[2].trim() : null, pageStart: null, pageEnd: null };
+    const starts: { line: number; section: string | null }[] = [];
+    if (!/^#{1,6} /.test(lines[0] ?? "")) starts.push({ line: 1, section: null });
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(#{1,6}) (.*)$/);
+      if (m) starts.push({ line: i + 1, section: m[2].trim() });
+    }
+    const blocks: SourceBlock[] = [];
+    for (let i = 0; i < starts.length; i++) {
+      const from = starts[i].line;
+      const to = i + 1 < starts.length ? starts[i + 1].line - 1 : lines.length;
+      const raw = lines.slice(from - 1, to).join("\n");
+      if (!raw.trim()) continue;
+      blocks.push({
+        text: raw,
+        section: starts[i].section,
+        pageStart: null,
+        pageEnd: null,
+        lineStart: from,
+        lineEnd: to,
       });
     }
+    if (blocks.length) return blocks;
   }
-  return [{ text, section: null, pageStart: null, pageEnd: null }];
+  return [{
+    text, section: null, pageStart: null, pageEnd: null,
+    lineStart: 1, lineEnd: Math.max(1, lines.length),
+  }];
 }
 
 async function parsePdf(fp: string): Promise<ParsedDocument> {

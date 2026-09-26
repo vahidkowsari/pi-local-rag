@@ -1,10 +1,13 @@
-import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync, promises as fsPromises } from "node:fs";
+import { readFileSync, readdirSync, statSync, mkdtempSync, rmSync, writeFileSync, promises as fsPromises } from "node:fs";
 import { extname, basename, join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import ignore from "ignore";
-import { BINARY_DOC_EXTS, TEXT_MAX_BYTES, BINARY_DOC_MAX_BYTES, SKIP_DIRS } from "./constants.ts";
+import {
+  BINARY_DOC_EXTS, TEXT_MAX_BYTES, BINARY_DOC_MAX_BYTES, SKIP_DIRS,
+  CHUNK_TARGET_TOKENS, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS,
+} from "./constants.ts";
 import { loadConfig, resolveExtensions, type RagConfig } from "./config.ts";
 import type { SourceBlock } from "./parsing.ts";
 
@@ -44,12 +47,102 @@ export function chunkText(text: string, maxLines = 50): TextChunk[] {
   return chunks;
 }
 
-const DEFAULT_TARGET_TOKENS = 180; // MiniLM context is 256; leave headroom
-const DEFAULT_MAX_TOKENS = 240;
-const DEFAULT_OVERLAP_TOKENS = 30;
+function isCjk(ch: string): boolean {
+  const c = ch.codePointAt(0) ?? 0;
+  return (
+    (c >= 0x3400 && c <= 0x9fff) ||
+    (c >= 0xf900 && c <= 0xfaff) ||
+    (c >= 0x3040 && c <= 0x30ff) ||
+    (c >= 0xac00 && c <= 0xd7af)
+  );
+}
 
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+/** Conservative estimate: CJK ≈ 1 token/char, other ≈ 4 chars/token. Not a model tokenizer. */
+export function estimateTokens(text: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (isCjk(ch)) cjk++;
+    else other++;
+  }
+  return Math.max(1, cjk + Math.ceil(other / 4));
+}
+
+function hardSplitByTokens(text: string, maxTokens: number): string[] {
+  const out: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let lo = 1;
+    let hi = Math.min(text.length - start, Math.max(8, maxTokens * 4));
+    let best = 1;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (estimateTokens(text.slice(start, start + mid)) <= maxTokens) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    out.push(text.slice(start, start + best));
+    start += best;
+  }
+  return out.length ? out : [text];
+}
+
+function splitOversized(text: string, maxTokens: number): string[] {
+  if (estimateTokens(text) <= maxTokens) return [text];
+  const sentences = text.split(/(?<=[。！？.!?])\s+|\n+/).filter(s => s.length > 0);
+  const out: string[] = [];
+  let buf = "";
+  const pushBuf = () => {
+    if (!buf) return;
+    if (estimateTokens(buf) <= maxTokens) out.push(buf);
+    else out.push(...hardSplitByTokens(buf, maxTokens));
+    buf = "";
+  };
+  for (const s of sentences) {
+    if (estimateTokens(s) > maxTokens) {
+      pushBuf();
+      out.push(...hardSplitByTokens(s, maxTokens));
+      continue;
+    }
+    if (!buf) { buf = s; continue; }
+    const joined = buf + " " + s;
+    if (estimateTokens(joined) > maxTokens) {
+      pushBuf();
+      buf = s;
+    } else {
+      buf = joined;
+    }
+  }
+  pushBuf();
+  return out.length ? out : hardSplitByTokens(text, maxTokens);
+}
+
+function paragraphSpans(block: SourceBlock): { text: string; lineStart: number | null; lineEnd: number | null }[] {
+  const original = block.text;
+  const known = block.lineStart != null && block.lineStart > 0;
+  const spans: { text: string; lineStart: number | null; lineEnd: number | null }[] = [];
+  const parts = original.split(/\n{2,}/);
+  let cursor = 0;
+  for (const part of parts) {
+    const start = original.indexOf(part, cursor);
+    const end = start + part.length;
+    const piece = part.trim();
+    if (piece) {
+      if (known) {
+        const before = original.slice(0, start);
+        const lineStart = (block.lineStart as number) + (before.split("\n").length - 1);
+        const lineEnd = lineStart + piece.split("\n").length - 1;
+        spans.push({ text: piece, lineStart, lineEnd });
+      } else {
+        spans.push({ text: piece, lineStart: null, lineEnd: null });
+      }
+    }
+    cursor = end;
+  }
+  return spans;
 }
 
 /**
@@ -61,65 +154,111 @@ export function chunkBlocks(
   blocks: SourceBlock[],
   opts: { targetTokens?: number; maxTokens?: number; overlapTokens?: number } = {},
 ): TextChunk[] {
-  const target = opts.targetTokens ?? DEFAULT_TARGET_TOKENS;
-  const max = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
-  const overlap = opts.overlapTokens ?? DEFAULT_OVERLAP_TOKENS;
+  const target = opts.targetTokens ?? CHUNK_TARGET_TOKENS;
+  const max = opts.maxTokens ?? CHUNK_MAX_TOKENS;
+  const overlap = opts.overlapTokens ?? CHUNK_OVERLAP_TOKENS;
   const chunks: TextChunk[] = [];
   let buf = "";
-  let lineStart = 1;
-  let linePos = 1;
+  let addedSinceFlush = "";
+  let lineStart = 0;
+  let lineEnd = 0;
   let pageStart: number | null = null;
   let pageEnd: number | null = null;
   let section: string | null = null;
 
-  const flush = (force = false) => {
-    if (!buf.trim()) return;
-    if (!force && estimateTokens(buf) < target) return;
+  const pushChunk = (content: string) => {
     chunks.push({
-      content: buf.trimEnd(),
-      lineStart,
-      lineEnd: linePos,
+      content,
+      lineStart: lineStart > 0 ? lineStart : 0,
+      lineEnd: lineEnd > 0 ? lineEnd : 0,
       pageStart,
       pageEnd,
       section,
       chunkIndex: chunks.length,
     });
-    if (overlap > 0 && buf.length > 0) {
-      const keep = buf.slice(-overlap * 4);
-      buf = keep;
-      lineStart = Math.max(1, linePos - keep.split("\n").length + 1);
-    } else {
-      buf = "";
-      lineStart = linePos + 1;
-      pageStart = null;
-      pageEnd = null;
+  };
+
+  const emit = (content: string) => {
+    const trimmed = content.trimEnd();
+    if (!trimmed) return;
+    if (estimateTokens(trimmed) > max) {
+      for (const part of hardSplitByTokens(trimmed, max)) pushChunk(part);
+      return;
     }
+    pushChunk(trimmed);
+  };
+
+  const resetBuf = () => {
+    buf = "";
+    addedSinceFlush = "";
+    lineStart = 0;
+    lineEnd = 0;
+    pageStart = null;
+    pageEnd = null;
+  };
+
+  const flush = (force = false) => {
+    if (!buf.trim()) return;
+    if (!force && estimateTokens(buf) < target) return;
+    if (addedSinceFlush.trim()) emit(buf);
+    if (overlap > 0 && addedSinceFlush.trim()) {
+      const keep = buf.slice(-Math.max(1, overlap * 2));
+      buf = keep;
+      addedSinceFlush = "";
+      if (lineEnd > 0) lineStart = Math.max(1, lineEnd - keep.split("\n").length + 1);
+    } else {
+      resetBuf();
+    }
+  };
+
+  const joinPiece = (base: string, piece: string) => (base ? base + "\n\n" + piece : piece);
+
+  const appendPiece = (
+    piece: string,
+    src: { lineStart: number | null; lineEnd: number | null; pageStart: number | null; pageEnd: number | null; section: string | null },
+  ) => {
+    if (buf && estimateTokens(joinPiece(buf, piece)) > max) {
+      flush(true);
+      while (buf && estimateTokens(joinPiece(buf, piece)) > max) {
+        if (buf.length <= 1) { resetBuf(); break; }
+        buf = buf.slice(Math.ceil(buf.length / 2));
+      }
+    }
+    if (!buf) {
+      lineStart = src.lineStart ?? 0;
+      pageStart = src.pageStart;
+      section = src.section;
+    }
+    buf = joinPiece(buf, piece);
+    addedSinceFlush = addedSinceFlush ? addedSinceFlush + "\n\n" + piece : piece;
+    if (src.lineEnd != null && src.lineEnd > 0) lineEnd = src.lineEnd;
+    if (src.pageStart != null) pageStart = pageStart ?? src.pageStart;
+    if (src.pageEnd != null) pageEnd = src.pageEnd;
+    if (estimateTokens(buf) > max) {
+      emit(buf);
+      resetBuf();
+      return;
+    }
+    if (estimateTokens(buf) >= target) flush(true);
   };
 
   for (const block of blocks) {
     if (!block.text.trim()) continue;
     if (buf && block.pageStart != null && pageEnd != null && block.pageStart > pageEnd) {
       flush(true);
-      buf = "";
-      pageStart = null;
-      pageEnd = null;
+      resetBuf();
     }
-    const paras = block.text.split(/\n{2,}/);
-    for (const para of paras) {
-      const piece = para.trim();
-      if (!piece) continue;
-      const pieceLines = piece.split("\n").length;
-      if (buf && estimateTokens(buf + "\n\n" + piece) > max) flush(true);
-      if (!buf) {
-        lineStart = linePos;
-        pageStart = block.pageStart;
-        section = block.section;
+    for (const span of paragraphSpans(block)) {
+      const pieces = splitOversized(span.text, max);
+      for (const piece of pieces) {
+        appendPiece(piece, {
+          lineStart: span.lineStart,
+          lineEnd: span.lineEnd,
+          pageStart: block.pageStart,
+          pageEnd: block.pageEnd,
+          section: block.section,
+        });
       }
-      buf = buf ? buf + "\n\n" + piece : piece;
-      if (block.pageStart != null) pageStart = pageStart ?? block.pageStart;
-      if (block.pageEnd != null) pageEnd = block.pageEnd;
-      linePos += pieceLines + 1;
-      if (estimateTokens(buf) >= target) flush(true);
     }
   }
   flush(true);
@@ -130,6 +269,7 @@ export function collectFiles(
   dirPath: string,
   exts?: Set<string>,
   excludePatterns: string[] = [],
+  errors?: string[],
 ): string[] {
   const allowed = exts ?? resolveExtensions(loadConfig());
   const ig = excludePatterns.length ? ignore().add(excludePatterns) : null;
@@ -157,38 +297,75 @@ export function collectFiles(
       if (ig && ig.ignores(basename(dirPath))) return [];
       return [dirPath];
     }
-  } catch { return []; }
+  } catch (err) {
+    errors?.push(formatPathError(dirPath, err));
+    return [];
+  }
 
   function walk(dir: string) {
+    let entries: import("node:fs").Dirent[];
     try {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const fp = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
-          if (isExcluded(fp)) continue;
-          walk(fp);
-        } else {
-          const ext = extname(entry.name).toLowerCase();
-          if (!allowed.has(ext) && !BINARY_DOC_EXTS.has(ext)) continue;
-          if (isExcluded(fp)) continue;
-          try {
-            if (acceptable(fp, statSync(fp).size)) files.push(fp);
-          } catch {}
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      errors?.push(formatPathError(dir, err));
+      return;
+    }
+    for (const entry of entries) {
+      const fp = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (isExcluded(fp)) continue;
+        walk(fp);
+      } else {
+        const ext = extname(entry.name).toLowerCase();
+        if (!allowed.has(ext) && !BINARY_DOC_EXTS.has(ext)) continue;
+        if (isExcluded(fp)) continue;
+        try {
+          if (acceptable(fp, statSync(fp).size)) files.push(fp);
+        } catch (err) {
+          errors?.push(formatPathError(fp, err));
         }
       }
-    } catch {}
+    }
   }
   walk(root);
   return files;
 }
 
-export function collectFromTracked(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): string[] {
-  const out = new Set<string>();
+function formatPathError(path: string, err: unknown): string {
+  const code = (err as { code?: string }).code;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (code === "ENOENT") return `${path}: path does not exist`;
+  if (code === "EACCES" || code === "EPERM") return `${path}: not readable`;
+  return `${path}: ${msg}`;
+}
+
+export interface TrackedScan {
+  files: string[];
+  errors: string[];
+  unavailableRoots: string[];
+}
+
+
+
+export function collectFromTrackedDetailed(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): TrackedScan {
+  const files = new Set<string>();
+  const errors: string[] = [];
+  const unavailableRoots: string[] = [];
   for (const p of cfg.trackedPaths) {
-    if (!existsSync(p)) continue;
-    for (const f of collectFiles(p, undefined, cfg.excludePatterns)) out.add(f);
+    const walkErrors: string[] = [];
+    const found = collectFiles(p, undefined, cfg.excludePatterns, walkErrors);
+    if (walkErrors.length) {
+      unavailableRoots.push(p);
+      errors.push(...walkErrors);
+    }
+    for (const f of found) files.add(f);
   }
-  return [...out];
+  return { files: [...files], errors, unavailableRoots };
+}
+
+export function collectFromTracked(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): string[] {
+  return collectFromTrackedDetailed(cfg).files;
 }
 
 /**
@@ -202,6 +379,7 @@ export async function collectFilesAsync(
   dirPath: string,
   exts?: Set<string>,
   excludePatterns: string[] = [],
+  errors?: string[],
 ): Promise<string[]> {
   const allowed = exts ?? resolveExtensions(loadConfig());
   const ig = excludePatterns.length ? ignore().add(excludePatterns) : null;
@@ -229,13 +407,19 @@ export async function collectFilesAsync(
       if (ig && ig.ignores(basename(dirPath))) return [];
       return [dirPath];
     }
-  } catch { return []; }
+  } catch (err) {
+    errors?.push(formatPathError(dirPath, err));
+    return [];
+  }
 
   async function walk(dir: string): Promise<void> {
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fsPromises.readdir(dir, { withFileTypes: true });
-    } catch { return; }
+    } catch (err) {
+      errors?.push(formatPathError(dir, err));
+      return;
+    }
     for (const entry of entries) {
       const fp = join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -249,7 +433,9 @@ export async function collectFilesAsync(
         try {
           const st = await fsPromises.stat(fp);
           if (acceptable(fp, st.size)) files.push(fp);
-        } catch {}
+        } catch (err) {
+          errors?.push(formatPathError(fp, err));
+        }
       }
     }
     // Yield between directories so the event loop can process UI updates.
@@ -260,13 +446,26 @@ export async function collectFilesAsync(
   return files;
 }
 
-export async function collectFromTrackedAsync(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): Promise<string[]> {
-  const out = new Set<string>();
+export async function collectFromTrackedDetailedAsync(
+  cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">,
+): Promise<TrackedScan> {
+  const files = new Set<string>();
+  const errors: string[] = [];
+  const unavailableRoots: string[] = [];
   for (const p of cfg.trackedPaths) {
-    if (!existsSync(p)) continue;
-    for (const f of await collectFilesAsync(p, undefined, cfg.excludePatterns)) out.add(f);
+    const walkErrors: string[] = [];
+    const found = await collectFilesAsync(p, undefined, cfg.excludePatterns, walkErrors);
+    if (walkErrors.length) {
+      unavailableRoots.push(p);
+      errors.push(...walkErrors);
+    }
+    for (const f of found) files.add(f);
   }
-  return [...out];
+  return { files: [...files], errors, unavailableRoots };
+}
+
+export async function collectFromTrackedAsync(cfg: Pick<RagConfig, "trackedPaths" | "excludePatterns">): Promise<string[]> {
+  return (await collectFromTrackedDetailedAsync(cfg)).files;
 }
 
 /** Returns true if `file` is matched by `excludePatterns` relative to any of `roots`. */

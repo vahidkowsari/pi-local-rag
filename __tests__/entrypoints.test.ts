@@ -201,7 +201,7 @@ describe("package files list includes runtime modules", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as { files: string[] };
     for (const f of [
       "index.ts", "constants.ts", "store.ts", "config.ts", "db.ts",
-      "chunking.ts", "embed.ts", "search.ts", "indexing.ts", "repository.ts",
+      "chunking.ts", "embed.ts", "search.ts", "indexing.ts", "repository.ts", "abort.ts",
     ]) {
       expect(pkg.files, `missing ${f}`).toContain(f);
     }

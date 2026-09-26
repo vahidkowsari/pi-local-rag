@@ -166,6 +166,119 @@ Auto-injection is on by default. Config lives in `<ragDir>/config.json`:
 | `trackedPaths` | `[]` | Absolute paths that `/rag rebuild`/`refresh` re-walk |
 | `excludePatterns` | `[]` | Gitignore-style patterns applied when walking tracked paths |
 
+## Provider registry (`provider.json`)
+
+Cloud embedding and reranking providers are declared in `provider.json`, not
+hard-coded in the extension. The file is read from the active RAG directory
+(for example `.pi/rag/provider.json`); if it is missing, the bundled
+`provider.json` is used as a compatibility default.
+
+A provider has two separate identifiers:
+
+- The registry key, such as `voyage` or `my-voyage-proxy`, is the value used
+  by `config.json`.
+- `type`, such as `voyage` or `transformers`, selects the built-in wire
+  protocol adapter.
+
+This separation makes aliases and compatible proxies possible without
+changing provider implementation code. A new wire protocol still requires a
+new adapter; JSON cannot describe an arbitrary HTTP protocol by itself.
+
+The default registry contains:
+
+- `local`: Transformers.js `Xenova/all-MiniLM-L6-v2`, 384 dimensions
+- `voyage`: Voyage embedding and rerank models, authenticated with
+  `VOYAGE_API_KEY`
+- `none`: the no-op reranker
+
+API keys are never written to either JSON file. `auth.env` names an
+environment variable, and the provider implementation reads that variable at
+runtime.
+
+Example project override:
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "my-voyage-proxy": {
+      "type": "voyage",
+      "baseUrl": "https://proxy.example.com/v1",
+      "auth": {
+        "type": "bearer",
+        "env": "MY_VOYAGE_API_KEY"
+      },
+      "models": {
+        "embedding": {
+          "voyage-4-lite": {
+            "dimensions": 1024
+          }
+        },
+        "rerank": {
+          "rerank-2.5-lite": {}
+        }
+      }
+    }
+  }
+}
+```
+
+Then select it in `config.json`:
+
+```json
+{
+  "embedding": {
+    "provider": "my-voyage-proxy",
+    "model": "voyage-4-lite",
+    "dimensions": 1024
+  },
+  "reranker": {
+    "provider": "my-voyage-proxy",
+    "model": "rerank-2.5-lite"
+  }
+}
+```
+
+The `dimensions` field is retained for compatibility with existing config
+files. During validation it must agree with the model metadata in
+`provider.json`. It can be removed in a future migration once all callers
+derive dimensions from the registry.
+
+If a provider endpoint, adapter type, or model metadata changes, the embedding
+fingerprint changes and Pi asks for a rebuild. The hash intentionally excludes
+the API key.
+
+### Recommended code reading order
+
+For understanding the implementation, read the files in this order:
+
+1. **`provider.json`** — see the provider registry, aliases, endpoints,
+   environment-variable names, and model metadata.
+2. **`provider-config.ts`** — see how the JSON is loaded, how a project file
+   overrides the bundled default, and how a provider/model is resolved.
+3. **`config.ts`** — see the separation between user selection
+   (`config.json`) and provider capabilities (`provider.json`), plus
+   validation and environment overrides.
+4. **`providers/embedding/factory.ts`** — see how an embedding selection is
+   resolved and cached, including local, Voyage, and historical index lookup.
+5. **`providers/reranker/factory.ts`** — see the same provider-driven pattern
+   for reranking.
+6. **`providers/embedding/voyage.ts`** and
+   **`providers/reranker/voyage.ts`** — see how the resolved base URL and
+   credentials reach the existing Voyage wire adapters.
+7. **`fingerprint.ts`** and **`index-manager.ts`** — see why provider changes
+   invalidate vector indexes and why failed rebuilds do not replace the live
+   index.
+8. **`indexing.ts`**, **`search.ts`**, and **`retrieval.ts`** — follow the data
+   flow from file parsing and embedding through hybrid search and optional
+   reranking.
+9. **`index.ts`** — finally inspect the Pi Extension registration, commands,
+   tools, and before-agent-start auto-injection hook.
+
+For a quick end-to-end trace, start at `createEmbeddingProvider()` in
+`providers/embedding/factory.ts`, then follow the returned provider into
+`indexFiles()` and `embeddingProviderForIndex()`.
+
 ## Testing
 
 ```bash

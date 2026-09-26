@@ -3,7 +3,7 @@ import { assertValidVectors } from "./validate.ts";
 import type { EmbedBatchOptions, EmbeddingProvider } from "./types.ts";
 import { DEFAULT_VOYAGE_EMBED_DIM, DEFAULT_VOYAGE_EMBED_MODEL } from "../../config.ts";
 
-const EMBED_URL = "https://api.voyageai.com/v1/embeddings";
+const DEFAULT_BASE_URL = "https://api.voyageai.com/v1";
 const MAX_ITEMS = 1000;
 const MAX_INPUT_TOKENS = 32_000;
 const MAX_BATCH_TOKENS = 100_000;
@@ -14,6 +14,10 @@ export function estimateTokens(text: string): number {
 }
 
 export interface VoyageEmbeddingOptions {
+  /** Registry key, when the provider is aliased in provider.json. */
+  id?: string;
+  /** Base URL comes from provider.json in normal Extension execution. */
+  baseUrl?: string;
   model?: string;
   dimensions?: number;
   apiKey: string;
@@ -53,19 +57,22 @@ function mapByIndex(data: VoyageEmbeddingItem[], expected: number): number[][] {
 }
 
 export class VoyageEmbeddingProvider implements EmbeddingProvider {
-  readonly id = "voyage";
+  readonly id: string;
   readonly model: string;
   readonly dimensions: number;
   private readonly apiKey: string;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
+  private readonly endpoint: string;
+  readonly timeoutMs: number;
+  readonly maxRetries: number;
   requestCount = 0;
 
   constructor(opts: VoyageEmbeddingOptions) {
-    if (!opts.apiKey) throw new Error("VOYAGE_API_KEY is required for the voyage embedding provider");
+    if (!opts.apiKey) throw new Error("An API key is required for the Voyage embedding provider");
+    this.id = opts.id ?? "voyage";
     this.model = opts.model ?? DEFAULT_VOYAGE_EMBED_MODEL;
     this.dimensions = opts.dimensions ?? DEFAULT_VOYAGE_EMBED_DIM;
     this.apiKey = opts.apiKey;
+    this.endpoint = `${(opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "")}/embeddings`;
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.maxRetries = opts.maxRetries ?? 3;
   }
@@ -141,7 +148,7 @@ export class VoyageEmbeddingProvider implements EmbeddingProvider {
       output_dtype: "float",
       output_dimension: this.dimensions,
     };
-    const json = await postJson<VoyageEmbeddingResponse>(EMBED_URL, body, {
+    const json = await postJson<VoyageEmbeddingResponse>(this.endpoint, body, {
       apiKey: this.apiKey,
       timeoutMs: this.timeoutMs,
       maxRetries: this.maxRetries,

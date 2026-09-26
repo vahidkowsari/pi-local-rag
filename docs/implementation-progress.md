@@ -95,7 +95,33 @@ Compiler: TypeScript **5.7.3** (locked in `devDependencies`). Runtime: Node v22.
 
 ## E1–E4 — parse, chunk, metadata, eval
 
-- Status: **done** (this commit)
-- `extractBlocks` + `chunkBlocks`; PDF `pageStart` is 1-based physical page; markdown pages stay null. Chunk IDs use `sha256(path)-chunkIndex`. Eval set: `eval/questions.json` (20), runner does not invent cloud numbers.
-- Tests: `SKIP_EMBEDDING_TESTS=1 npm test` → 161 passed, 4 skipped. `npm run typecheck` → pass.
-- Unverified: live Voyage embed/rerank, live Pi, real research PDF spot-check, eval metrics on a labeled corpus.
+- Status after first landing: **partial / E4 incomplete** (eval was a template). See Astra review 2026-09-21.
+- Follow-up (this work):
+  - E2: `chunkBlocks` splits oversized paragraphs; CJK-aware estimate; overlap-only tails dropped. Chunker fingerprint is `token-v2` and includes target/max/overlap.
+  - E3: original markdown line ranges; PDF lines stay unknown and are not printed as `lines 1-2`; page/section/id/chunkIndex reach context, search, and `rag_query`.
+  - E4: `npm run eval:retrieval` indexes a local corpus and writes real local-bm25 metrics. Cloud groups remain not-run without a key.
+- Tests: `SKIP_EMBEDDING_TESTS=1 npm test` → 188 passed, 4 skipped. `npm run typecheck` → pass. Smoke scripts start under `--experimental-strip-types` without a key.
+- Unverified: live Voyage embed/rerank, live Pi session, 3-page generated PDF, real paper spot-check, MiniLM-quality eval.
+
+## Astra third-review follow-up (T1–T4)
+
+- T1: `collectFromTrackedDetailed` returns files plus unavailable roots. `/rag rebuild --force` and refresh refuse to drop or publish when a tracked root cannot be stat/readdir.
+- T2: `cloudAutoRefresh` and `ragEnabled` must be booleans; cloud auto-refresh requires `=== true`. String `"false"` is a reported type issue and does not refresh.
+- T3: `/rag search` uses the same invalid-JSON guard as `rag_query`.
+- T4: eval uses one `retrieveWithCandidates` call per question, stores `degraded`/`method`, and sets group status to `error` (all degraded) or `degraded` (partial).
+
+## Astra recheck follow-up (F1–F7)
+
+- F1: after overlap keep, a new piece is joined only if the estimate stays ≤ maxTokens; leftover overlap is shrunk or dropped. Probe `a×400 + b×960` is `[100, 240]`.
+- F2: overlap-only tails use `addedSinceFlush`; identical text on different pages/sections is kept. Context dedup includes page and chunk id.
+- F3: abort is re-checked after embed returns, before file writes, and before staging publish.
+- F4: `saveConfig` / `rag_index` / mutating `/rag` commands refuse an invalid `config.json`. `/rag config reset` copies it to `.broken-*` then writes defaults.
+- F5/F6: eval has four executable groups; recall uses a 30-candidate pool; sourceAccuracy is content-first then page.
+- F7: Voyage provider cache keys include timeoutMs and maxRetries.
+
+## Astra review follow-up (R1–R16)
+
+- Index safety: parse errors count as failed and block staging publish; `--force` rebuilds on a unique generation; dropped files are not pruned until success; empty schema dimension is checked; old generations are not deleted when restaging.
+- Query: compatibility is required; aborted signals throw; transient embed errors degrade to BM25; reranker config errors are visible; providers are cached per contract.
+- Cloud: auto-inject refreshes only when `embedding.provider=local` or `cloudAutoRefresh=true`, with a 12s deadline.
+- Config: invalid JSON is a visible issue; Voyage model lists and local dim pairing are validated.

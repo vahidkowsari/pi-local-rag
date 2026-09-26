@@ -6,6 +6,22 @@ export const GREEN = "\x1b[32m", YELLOW = "\x1b[33m", CYAN = "\x1b[36m", RED = "
 export const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 export const VECTOR_DIM = 384;
 
+/** MiniLM context is 256; leave headroom. Used by chunkBlocks and fingerprints. */
+export const CHUNK_TARGET_TOKENS = 180;
+export const CHUNK_MAX_TOKENS = 240;
+export const CHUNK_OVERLAP_TOKENS = 30;
+
+export const LOCAL_EMBED_DIMENSIONS: Record<string, number> = {
+  "Xenova/all-MiniLM-L6-v2": 384,
+};
+
+// Voyage model catalogs intentionally live in provider.json. Keeping them
+// here would create a second source of truth and make runtime model changes
+// require a code release.
+
+/** Wall-clock budget for the entire auto-inject chain (refresh + retrieve + context). */
+export const AUTO_INJECT_DEADLINE_MS = 12_000;
+
 export const DEFAULT_TEXT_EXTS = [
   ".md", ".mdx", ".txt", ".rst",
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",

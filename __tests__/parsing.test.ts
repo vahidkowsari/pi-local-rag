@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chunkBlocks } from "../chunking.ts";
+import { chunkBlocks, estimateTokens } from "../chunking.ts";
 import { extractBlocks } from "../parsing.ts";
 
 const SAMPLE_PDF = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "sample.pdf"));
@@ -24,11 +24,83 @@ describe("chunkBlocks", () => {
     expect(hit!.pageEnd).toBe(2);
   });
 
+  it("splits a single oversized paragraph and does not emit an overlap-only tail", () => {
+    const text = Array.from({ length: 800 }, (_, i) => `token${i}`).join(" ");
+    const chunks = chunkBlocks(
+      [{ text, section: null, pageStart: null, pageEnd: null, lineStart: 1, lineEnd: 1 }],
+      { targetTokens: 180, maxTokens: 240, overlapTokens: 30 },
+    );
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(estimateTokens(c.content)).toBeLessThanOrEqual(240);
+    const last = chunks[chunks.length - 1];
+    const prev = chunks[chunks.length - 2];
+    expect(prev.content.endsWith(last.content)).toBe(false);
+  });
+
+  it("keeps CJK text under the max token budget using the CJK-aware estimate", () => {
+    const text = "汉字".repeat(400);
+    const chunks = chunkBlocks(
+      [{ text, section: null, pageStart: null, pageEnd: null }],
+      { targetTokens: 180, maxTokens: 240, overlapTokens: 20 },
+    );
+    for (const c of chunks) {
+      expect(estimateTokens(c.content)).toBeLessThanOrEqual(240);
+    }
+  });
+
+  it("keeps a short first paragraph plus a near-max second paragraph under maxTokens", () => {
+    const text = "a".repeat(400) + "\n\n" + "b".repeat(960);
+    const chunks = chunkBlocks(
+      [{ text, section: null, pageStart: null, pageEnd: null, lineStart: 1, lineEnd: 3 }],
+      { targetTokens: 180, maxTokens: 240, overlapTokens: 30 },
+    );
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    for (const c of chunks) expect(estimateTokens(c.content)).toBeLessThanOrEqual(240);
+  });
+
+  it("keeps identical text from distinct PDF pages as separate chunks", () => {
+    const same = "Important repeated evidence";
+    const chunks = chunkBlocks([
+      { text: same, section: null, pageStart: 1, pageEnd: 1 },
+      { text: same, section: null, pageStart: 2, pageEnd: 2 },
+    ]);
+    expect(chunks.length).toBe(2);
+    expect(chunks[0].pageStart).toBe(1);
+    expect(chunks[1].pageStart).toBe(2);
+    expect(chunks[1].content).toContain("Important repeated evidence");
+  });
+
+  it("keeps a short suffix that is new content in a different section", () => {
+    const chunks = chunkBlocks([
+      { text: "alpha beta gamma delta epsilon", section: "A", pageStart: null, pageEnd: null, lineStart: 1, lineEnd: 1 },
+      { text: "epsilon", section: "B", pageStart: null, pageEnd: null, lineStart: 3, lineEnd: 3 },
+    ], { targetTokens: 8, maxTokens: 40, overlapTokens: 0 });
+    expect(chunks.some(c => c.section === "B" && c.content.includes("epsilon"))).toBe(true);
+  });
+
   it("does not invent PDF page numbers for markdown", () => {
     const chunks = chunkBlocks([
       { text: "# Title\n\nmarkdown body that is long enough to keep ".repeat(8), section: "Title", pageStart: null, pageEnd: null },
     ]);
     expect(chunks[0].pageStart).toBeNull();
+  });
+});
+
+describe("extractBlocks markdown sections", () => {
+  it("keeps short heading sections instead of dropping them", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rag-md-"));
+    const mdPath = join(dir, "note.md");
+    writeFileSync(mdPath, "# Short\n42\n\n# Long\n" + "full evidence ".repeat(8) + "\n");
+    try {
+      const parsed = await extractBlocks(mdPath);
+      expect(parsed.blocks.some(b => b.text.includes("42"))).toBe(true);
+      expect(parsed.blocks.some(b => b.section === "Short")).toBe(true);
+      expect(parsed.blocks.some(b => b.section === "Long")).toBe(true);
+      const short = parsed.blocks.find(b => b.section === "Short")!;
+      expect(short.lineStart).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

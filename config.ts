@@ -1,9 +1,21 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { configFile, getRagDir } from "./store.ts";
-import { DEFAULT_TEXT_EXTS, EMBEDDING_MODEL, VECTOR_DIM } from "./constants.ts";
+import {
+  DEFAULT_TEXT_EXTS, EMBEDDING_MODEL, VECTOR_DIM,
+} from "./constants.ts";
+import {
+  ProviderConfigError, getModelSpec, loadProviderFile,
+  type ProviderFile,
+} from "./provider-config.ts";
 
-export type EmbeddingProviderId = "local" | "voyage";
-export type RerankerProviderId = "none" | "voyage";
+/**
+ * Provider IDs are registry keys, not protocol names. For example, a custom
+ * proxy may be called "my-voyage" while still using `type: "voyage"`.
+ * The string type keeps provider.json open-ended without changing the shape
+ * of the persisted config.
+ */
+export type EmbeddingProviderId = string;
+export type RerankerProviderId = string;
 
 export interface EmbeddingConfig {
   provider: EmbeddingProviderId;
@@ -39,9 +51,14 @@ export interface RagConfig {
   cloudAutoRefresh: boolean;
 }
 
+/**
+ * Legacy direct-construction fallbacks. Normal Extension resolution gets all
+ * provider/model metadata from provider.json; these values only keep the
+ * standalone Voyage classes backwards compatible for library consumers.
+ */
 export const DEFAULT_VOYAGE_EMBED_MODEL = "voyage-4-lite";
 export const DEFAULT_VOYAGE_EMBED_DIM = 1024;
-export const DEFAULT_VOYAGE_RERANK_MODEL = "rerank-2.5-lite";
+export const DEFAULT_VOYAGE_RERANK_MODEL = "rerank-3-lite";
 export const CANDIDATE_TOP_K_MAX = 200;
 
 export function defaultConfig(): RagConfig {
@@ -72,13 +89,26 @@ function mergeSaved(raw: unknown): RagConfig {
   return { ...d, ...rest, embedding, reranker, http } as RagConfig;
 }
 
-function readSavedConfig(): RagConfig {
+function readSavedConfig(): { config: RagConfig; fileStatus: ConfigLoadResult["fileStatus"]; issue?: string } {
   const cfgFile = configFile(getRagDir());
-  if (!existsSync(cfgFile)) return defaultConfig();
+  if (!existsSync(cfgFile)) return { config: defaultConfig(), fileStatus: "missing" };
   try {
-    return mergeSaved(JSON.parse(readFileSync(cfgFile, "utf-8")));
-  } catch {
-    return defaultConfig();
+    const raw = JSON.parse(readFileSync(cfgFile, "utf-8"));
+    if (!isPlainObject(raw)) {
+      return {
+        config: defaultConfig(),
+        fileStatus: "invalid",
+        issue: `config.json is not a JSON object. Using defaults until it is repaired or replaced.`,
+      };
+    }
+    return { config: mergeSaved(raw), fileStatus: "ok" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      config: defaultConfig(),
+      fileStatus: "invalid",
+      issue: `config.json is invalid JSON (${msg}). Using defaults until it is repaired or replaced.`,
+    };
   }
 }
 
@@ -87,11 +117,21 @@ function envString(name: string): string | undefined {
   return v !== undefined && v !== "" ? v : undefined;
 }
 
+const envParseIssues: string[] = [];
+
+function noteEnvIssue(msg: string) {
+  envParseIssues.push(msg);
+}
+
 function envInt(name: string): number | undefined {
   const v = envString(name);
   if (v === undefined) return undefined;
   const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+  if (!Number.isFinite(n)) {
+    noteEnvIssue(`${name}=${JSON.stringify(v)} is not a number`);
+    return undefined;
+  }
+  return n;
 }
 
 function envBool(name: string): boolean | undefined {
@@ -99,7 +139,57 @@ function envBool(name: string): boolean | undefined {
   if (v === undefined) return undefined;
   if (v === "1" || v === "true" || v === "yes") return true;
   if (v === "0" || v === "false" || v === "no") return false;
+  noteEnvIssue(`${name}=${JSON.stringify(process.env[name])} is not a boolean`);
   return undefined;
+}
+
+export interface ConfigLoadResult {
+  config: RagConfig;
+  issues: string[];
+  /** "missing" = no file; "ok" = parsed; "invalid" = broken JSON or non-object. */
+  fileStatus: "missing" | "ok" | "invalid";
+}
+
+let lastConfigLoad: ConfigLoadResult = {
+  config: defaultConfig(),
+  issues: [],
+  fileStatus: "missing",
+};
+
+export function getConfigLoad(): ConfigLoadResult {
+  return lastConfigLoad;
+}
+
+export class ConfigFileInvalidError extends Error {
+  readonly issues: string[];
+  constructor(issues: string[]) {
+    super(issues.join("\n"));
+    this.name = "ConfigFileInvalidError";
+    this.issues = issues;
+  }
+}
+
+export function requireWritableConfig(): RagConfig {
+  const loaded = loadConfigDetailed();
+  const blocking = blockingConfigIssues(loaded);
+  if (blocking.length) {
+    throw new ConfigFileInvalidError(blocking);
+  }
+  return loaded.config;
+}
+
+/** Copy a broken config.json aside and write defaults. Returns the backup path. */
+export function resetBrokenConfig(): string {
+  const cfgFile = configFile(getRagDir());
+  let backup = "";
+  if (existsSync(cfgFile)) {
+    backup = `${cfgFile}.broken-${Date.now()}`;
+    copyFileSync(cfgFile, backup);
+  }
+  const next = defaultConfig();
+  writeFileSync(cfgFile, JSON.stringify(next, null, 2));
+  lastConfigLoad = { config: applyEnvOverrides(next), issues: validateConfig(applyEnvOverrides(next)), fileStatus: "ok" };
+  return backup;
 }
 
 /** Apply PI_RAG_* (and only those) env overrides onto a config object. */
@@ -144,8 +234,12 @@ function stripSecrets(config: RagConfig): RagConfig {
  * Persist config without writing env-only overlays or API keys.
  * Fields currently set via PI_RAG_* keep their previously saved values.
  */
-export function saveConfig(config: RagConfig) {
-  const saved = readSavedConfig();
+export function saveConfig(config: RagConfig, opts?: { replaceInvalid?: boolean }) {
+  const current = readSavedConfig();
+  if (current.fileStatus === "invalid" && !opts?.replaceInvalid) {
+    throw new ConfigFileInvalidError([current.issue ?? "config.json is invalid"]);
+  }
+  const saved = current.fileStatus === "ok" ? current.config : defaultConfig();
   const next = stripSecrets({
     ...config,
     embedding: { ...config.embedding },
@@ -166,35 +260,82 @@ export function saveConfig(config: RagConfig) {
 }
 
 export function loadConfig(): RagConfig {
-  return applyEnvOverrides(readSavedConfig());
+  return loadConfigDetailed().config;
 }
 
+export function loadConfigDetailed(): ConfigLoadResult {
+  envParseIssues.length = 0;
+  const saved = readSavedConfig();
+  const config = applyEnvOverrides(saved.config);
+  const issues: string[] = [];
+  if (saved.issue) issues.push(saved.issue);
+  issues.push(...envParseIssues);
+  issues.push(...validateConfig(config));
+  lastConfigLoad = { config, issues, fileStatus: saved.fileStatus };
+  return lastConfigLoad;
+}
+
+/** @deprecated Provider resolution reads auth.env from provider.json. */
 export function voyageApiKey(): string | undefined {
   return envString("VOYAGE_API_KEY");
 }
 
 export function validateConfig(config: RagConfig): string[] {
   const issues: string[] = [];
-  if (config.embedding.provider !== "local" && config.embedding.provider !== "voyage") {
-    issues.push(`Unsupported embedding provider "${config.embedding.provider}". Use "local" or "voyage".`);
-  }
-  if (config.reranker.provider !== "none" && config.reranker.provider !== "voyage") {
-    issues.push(`Unsupported reranker provider "${config.reranker.provider}". Use "none" or "voyage".`);
-  }
   if (!Number.isInteger(config.embedding.dimensions) || config.embedding.dimensions <= 0) {
     issues.push(`embedding.dimensions must be a positive integer, got ${config.embedding.dimensions}.`);
   }
   if (!config.embedding.model || typeof config.embedding.model !== "string") {
     issues.push("embedding.model is required.");
   }
-  if (config.embedding.provider === "voyage") {
-    const allowed = [256, 512, 1024, 2048];
-    if (!allowed.includes(config.embedding.dimensions)) {
-      issues.push(`voyage embedding dimensions must be one of ${allowed.join(", ")} (got ${config.embedding.dimensions}).`);
+
+  // provider.json is the source of truth for available providers, models,
+  // dimensions, and credentials. This keeps model catalogs out of config.ts.
+  let providers: ProviderFile | undefined;
+  try {
+    providers = loadProviderFile();
+  } catch (error) {
+    issues.push(error instanceof ProviderConfigError ? error.message : String(error));
+  }
+
+  if (providers) {
+    try {
+      const embedding = getModelSpec(config.embedding.provider, "embedding", config.embedding.model, providers);
+      if (embedding.dimensions !== undefined && config.embedding.dimensions !== embedding.dimensions) {
+        issues.push(
+          `embedding ${config.embedding.provider}/${config.embedding.model} requires ${embedding.dimensions} dimensions ` +
+          `(config.json requests ${config.embedding.dimensions}).`,
+        );
+      }
+      const embeddingProvider = providers.providers[config.embedding.provider];
+      if (embeddingProvider?.auth && !process.env[embeddingProvider.auth.env]) {
+        issues.push(
+          `${embeddingProvider.auth.env} is not set; it is required by provider ` +
+          `"${config.embedding.provider}" and is never stored in provider.json.`,
+        );
+      }
+    } catch (error) {
+      issues.push(error instanceof ProviderConfigError ? error.message : String(error));
     }
-    if (!voyageApiKey()) {
-      issues.push("VOYAGE_API_KEY is not set. Export it in the environment; it is never stored in config.json.");
+
+    try {
+      getModelSpec(config.reranker.provider, "rerank", config.reranker.model, providers);
+      const rerankerProvider = providers.providers[config.reranker.provider];
+      if (rerankerProvider?.auth && !process.env[rerankerProvider.auth.env]) {
+        issues.push(
+          `${rerankerProvider.auth.env} is not set; it is required by reranker ` +
+          `provider "${config.reranker.provider}".`,
+        );
+      }
+    } catch (error) {
+      issues.push(error instanceof ProviderConfigError ? error.message : String(error));
     }
+  }
+  if (typeof config.ragAlpha !== "number" || !Number.isFinite(config.ragAlpha) || config.ragAlpha < 0 || config.ragAlpha > 1) {
+    issues.push(`ragAlpha must be a number in [0, 1], got ${config.ragAlpha}.`);
+  }
+  if (typeof config.ragScoreThreshold !== "number" || !Number.isFinite(config.ragScoreThreshold) || config.ragScoreThreshold < 0 || config.ragScoreThreshold > 1) {
+    issues.push(`ragScoreThreshold must be a number in [0, 1], got ${config.ragScoreThreshold}.`);
   }
   if (!Number.isInteger(config.ragTopK) || config.ragTopK < 1) {
     issues.push(`ragTopK must be a positive integer, got ${config.ragTopK}.`);
@@ -215,7 +356,22 @@ export function validateConfig(config: RagConfig): string[] {
   if (!Number.isInteger(config.http.maxRetries) || config.http.maxRetries < 0 || config.http.maxRetries > 8) {
     issues.push(`http.maxRetries must be an integer 0–8, got ${config.http.maxRetries}.`);
   }
+  if (typeof config.cloudAutoRefresh !== "boolean") {
+    issues.push(`cloudAutoRefresh must be a boolean, got ${JSON.stringify(config.cloudAutoRefresh)}.`);
+  }
+  if (typeof config.ragEnabled !== "boolean") {
+    issues.push(`ragEnabled must be a boolean, got ${JSON.stringify(config.ragEnabled)}.`);
+  }
   return issues;
+}
+
+export function isTypeConfigIssue(msg: string): boolean {
+  return /must be a boolean|must be a number|must be an integer|must be a JSON/.test(msg);
+}
+
+export function blockingConfigIssues(loaded: ConfigLoadResult): string[] {
+  if (loaded.fileStatus === "invalid") return loaded.issues;
+  return loaded.issues.filter(isTypeConfigIssue);
 }
 
 /** Throw if config cannot be used for the requested provider construction. */

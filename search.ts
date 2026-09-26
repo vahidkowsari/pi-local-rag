@@ -2,13 +2,28 @@ import type Database from "better-sqlite3";
 import { getDbConn, type Chunk } from "./db.ts";
 import * as repo from "./repository.ts";
 import { embeddingProviderForIndex } from "./providers/embedding/factory.ts";
-import { loadConfig } from "./config.ts";
+import { CANDIDATE_TOP_K_MAX, loadConfig, type RagConfig } from "./config.ts";
+import { checkIndexCompatibility, IndexIncompatibleError } from "./index-manager.ts";
+import { isAbortError, throwIfAborted } from "./abort.ts";
+import { HttpError } from "./providers/http.ts";
 
 export interface ScoredChunk {
   chunk: Chunk;
   bm25: number;
   vector: number;
   hybrid: number;
+  degraded?: string;
+}
+
+export interface HybridSearchOptions {
+  signal?: AbortSignal;
+  config?: RagConfig;
+}
+
+export interface HybridSearchResult {
+  hits: ScoredChunk[];
+  /** Set when query embedding failed and the request fell back to BM25. Independent of hits.length. */
+  degraded?: string;
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
@@ -53,32 +68,58 @@ function l2ToCosine(l2Dist: number): number {
 /**
  * Hybrid search using SQLite FTS5 (BM25) + sqlite-vec (vector).
  */
-export async function hybridSearch(
+function isTransientEmbedError(err: unknown): boolean {
+  if (isAbortError(err)) return false;
+  if (err instanceof IndexIncompatibleError) return false;
+  if (err instanceof HttpError) return err.retryable || err.status === 0;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /network|ECONN|ETIMEDOUT|ENOTFOUND|fetch|timeout|503|502|429|model down/i.test(msg);
+}
+
+export async function hybridSearchDetailed(
   query: string,
   limit = 10,
   alpha = 0.4,
-  _db?: Database.Database
-): Promise<ScoredChunk[]> {
+  _db?: Database.Database,
+  opts?: HybridSearchOptions,
+): Promise<HybridSearchResult> {
   const database = _db ?? getDbConn();
+  const config = opts?.config ?? loadConfig();
+  throwIfAborted(opts?.signal);
 
-  // Fast existence check — LIMIT 1 avoids full table scan
-  if (!repo.hasAnyChunks(database)) return [];
+  if (!repo.hasAnyChunks(database)) return { hits: [] };
 
-  // BM25 via FTS5 — cap candidates to avoid scanning entire index
+  const compat = checkIndexCompatibility(database, config);
+  if (!compat.ok) throw new IndexIncompatibleError(compat.reason);
+
+  const capped = Math.min(CANDIDATE_TOP_K_MAX, Math.max(1, limit));
   const ftsQuery = query.split(/\s+/).map(t => `"${t.replace(/"/g, '""')}"`).join(" ");
-  const ftsLimit = Math.max(limit * 20, 200);
+  const ftsLimit = Math.min(CANDIDATE_TOP_K_MAX, Math.max(capped * 20, 200));
   const ftsResults = repo.searchFts(database, ftsQuery, ftsLimit);
 
-  // Vector via sqlite-vec — use the provider that matches the active index.
-  const queryVec = await embeddingProviderForIndex(database, loadConfig()).embedQuery(query);
-  const vecLimit = Math.max(limit * 10, 100);
-  const vecResults = repo.searchVectors(database, queryVec, vecLimit);
+  let vecResults: repo.VecMatch[] = [];
+  let embedDegraded: string | undefined;
+  const embeddedCount = repo.getEmbeddedCount(database);
+  if (embeddedCount > 0) {
+    try {
+      throwIfAborted(opts?.signal);
+      const provider = embeddingProviderForIndex(database, config);
+      const queryVec = await provider.embedQuery(query, { signal: opts?.signal });
+      const vecLimit = Math.min(CANDIDATE_TOP_K_MAX, Math.max(capped * 10, 100));
+      vecResults = repo.searchVectors(database, queryVec, vecLimit);
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      if (err instanceof IndexIncompatibleError) throw err;
+      if (!isTransientEmbedError(err)) throw err;
+      embedDegraded = `query embedding failed, BM25 only: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
 
   const ftsRowIds = new Set(ftsResults.map(r => r.rowid));
   const vecRowIds = new Set(vecResults.map(r => r.rowid));
   const allRowIds: Set<number> = new Set([...ftsRowIds, ...vecRowIds]);
 
-  if (allRowIds.size === 0) return [];
+  if (allRowIds.size === 0) return { hits: [], degraded: embedDegraded };
 
   const chunks = repo.getChunksByRowids(database, Array.from(allRowIds));
 
@@ -149,16 +190,29 @@ export async function hybridSearch(
         id: c.id, file: c.file_path, content: c.chunk_content,
         lineStart: c.line_start, lineEnd: c.line_end,
         hash: c.chunk_hash, indexed: c.indexed_at, tokens: c.tokens,
-        pageStart: (c as { page_start?: number | null }).page_start ?? null,
-        pageEnd: (c as { page_end?: number | null }).page_end ?? null,
-        section: (c as { section?: string | null }).section ?? null,
+        pageStart: c.page_start ?? null,
+        pageEnd: c.page_end ?? null,
+        section: c.section ?? null,
+        chunkIndex: c.chunk_index ?? 0,
       },
       bm25: bm25Final, vector: vecNorm, hybrid,
+      degraded: embedDegraded,
     });
   }
 
-  return scored
+  const hits = scored
     .filter(s => s.hybrid > 0)
     .sort((a, b) => b.hybrid - a.hybrid)
     .slice(0, limit);
+  return { hits, degraded: embedDegraded };
+}
+
+export async function hybridSearch(
+  query: string,
+  limit = 10,
+  alpha = 0.4,
+  _db?: Database.Database,
+  opts?: HybridSearchOptions,
+): Promise<ScoredChunk[]> {
+  return (await hybridSearchDetailed(query, limit, alpha, _db, opts)).hits;
 }
