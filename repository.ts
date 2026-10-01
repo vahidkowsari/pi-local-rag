@@ -175,7 +175,8 @@ export function getEmbeddedCount(db: Database.Database): number {
   return row.embeddedCount;
 }
 
-export function clearAllVectors(db: Database.Database) {
+/** Wipes the whole index (chunks, files, vectors) and rebuilds the FTS index. */
+export function wipeIndex(db: Database.Database) {
   db.exec("DELETE FROM chunks_vec; DELETE FROM chunks; DELETE FROM files;");
   db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')");
 }
